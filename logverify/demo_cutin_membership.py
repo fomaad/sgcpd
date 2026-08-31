@@ -1,50 +1,84 @@
 """
-参照CPD（cut-in）に対する適合性検証のデモ。
+参照CPD（cut-in）に対する適合性検証 + シナリオ分類のデモ。
 
 実際のAJISAIログ（Boxで配布、リポジトリには同梱しない）が手元にない環境でも
 パイプライン全体を検証できるよう、ego基準の相対座標 (rx, ry) を
-手作りした3種類の合成トラジェクトリで試す:
+手作りした合成トラジェクトリで試す。
 
-  1. cutin_like       : 隣接レーンからegoレーンへ merge して、そのまま前方に留まる
-                         （典型的な cut-in）。 -> SAT が期待される。
-  2. stays_in_own_lane: 最初からずっと ego レーンにいる（隣接レーンから来ていない）。
-                         -> 参照モデルの init（隣接レーンのみ）に一致する箱がなく、
-                            ステップ0で unmatched になることが期待される。
-  3. swerve_like       : 隣接レーン -> egoレーン -> 隣接レーンに戻る、を繰り返す
-                         （蛇行）。 -> 合流後に隣接レーンへ戻る遷移が参照モデルに
-                            存在しないため UNSAT が期待される。
+v0.4 で追加したバリエーション:
+  - 近距離 / 中距離 / 遠距離 それぞれで始まり、合流するcut-in
+  - 隣接レーンで速度を合わせてしばらく並走してから、加速して合流するcut-in
+  これらはすべて同じ1つの参照CPD (build_cutin_reference の1回の呼び出し) の
+  異なる充足解（witness）として表現される。これがCPDの強み:
+  「距離帯・並走・加速といったバリエーション」を1つのモデルで書ける。
 
-実データに対しては logverify.grid_bridge.grid_states_from_json(path, gx, gy) で
-同じ (gx, gy) を使って離散化すればそのまま流用できる。
+  position を生の格子ではなく logverify.zones の
+  近距離/中距離/遠距離(+後方) という少数の順序値に丸めることで、
+  箱の数を距離レンジによらず一定に保ち、ソルバを高速に保っている
+  （生の格子のままだと箱の数が距離レンジに比例して増え、遷移が
+  箱数の2乗のオーダーで爆発してしまう）。
+
+実データに対しては logverify/zones.py の
+zone_states_from_relative_xy(rel_xy, gy, thresholds) に、
+座標正規化済みの (rx, ry) 列を渡せばそのまま使える。
 
 実行方法:
     cd sgcpd && python3 -m logverify.demo_cutin_membership
 """
 
-from logverify.grid_bridge import grid_states_from_relative_xy
 from logverify.membership import check_membership_cutin
-from logverify.reference_models import build_cutin_reference, describe
+from logverify.reference_models import build_cutin_reference
+from logverify.report import summarize_trace, describe_scenario
+from logverify.zones import zone_states_from_relative_xy, ZoneThresholds
 
-# 参照モデルと同じ粒度で離散化する。
-# gy=3.5: 一般的な車線幅(m)。 lane=0 が自車線、lane=+-1 が隣接レーン。
-# gx=5.0: 縦方向の1箱あたりの距離(m)。position=0 は「ほぼ横並び」、
-#         正が前方、負が後方。
-GX, GY = 5.0, 3.5
+GY = 3.5  # 車線幅(m)。 lane=0 が自車線、lane=+-1 が隣接レーン。
+THRESHOLDS = ZoneThresholds(near_max=5.0, medium_max=20.0)
 
 
-def make_cutin_like():
-    # NPCは右隣接レーン(ry=-3.5m)のやや前方(rx=15m)から始まり、
-    # 徐々に前方へ進みつつ、途中で ego レーンへ merge し、その後も前方へ進み続ける。
+def _lane_change_points(rx0, ry0, ry1, rx_step, n):
     pts = []
-    rx, ry = 15.0, -3.5
-    for _ in range(6):
-        pts.append((rx, ry)); rx += 2.0
-    # merge (ryが0へ)
-    for t in range(6):
-        pts.append((rx, ry + (t + 1) * (3.5 / 6))); rx += 2.0
-    ry = 0.0
-    for _ in range(6):
-        pts.append((rx, ry)); rx += 2.0
+    rx = rx0
+    for t in range(n):
+        pts.append((rx, ry0 + (ry1 - ry0) * (t + 1) / n))
+        rx += rx_step
+    return pts, rx
+
+
+def make_cutin_near():
+    # ego のすぐ横（近距離）から合流する
+    pts = [(2.0, -3.5), (3.0, -3.5)]
+    lane_pts, rx = _lane_change_points(4.0, -3.5, 0.0, 1.0, 4)
+    pts += lane_pts
+    pts += [(rx, 0.0), (rx + 1.0, 0.0)]
+    return pts
+
+
+def make_cutin_medium():
+    pts = [(12.0, -3.5), (14.0, -3.5), (16.0, -3.5)]
+    lane_pts, rx = _lane_change_points(18.0, -3.5, 0.0, 2.0, 5)
+    pts += lane_pts
+    pts += [(rx, 0.0), (rx + 2.0, 0.0)]
+    return pts
+
+
+def make_cutin_far():
+    pts = [(30.0, -3.5), (33.0, -3.5), (36.0, -3.5)]
+    lane_pts, rx = _lane_change_points(39.0, -3.5, 0.0, 3.0, 5)
+    pts += lane_pts
+    pts += [(rx, 0.0), (rx + 3.0, 0.0), (rx + 6.0, 0.0)]
+    return pts
+
+
+def make_cutin_parallel_then_accelerate():
+    # 隣接レーンでegoとほぼ横並びのまま速度を合わせて並走 -> 加速して前方へ抜けつつ合流
+    pts = []
+    rx, ry = 1.0, -3.5
+    for _ in range(6):  # 並走区間（ほぼ同じ rx のまま複数状態）
+        pts.append((rx, ry)); rx += 0.3
+    # 加速して一気に前方（遠距離）へ抜けながら合流（distance zoneが大きく飛ぶ）
+    lane_pts, rx = _lane_change_points(rx, -3.5, 0.0, 8.0, 3)
+    pts += lane_pts
+    pts += [(rx, 0.0), (rx + 25.0, 0.0)]
     return pts
 
 
@@ -59,13 +93,11 @@ def make_stays_in_own_lane():
 def make_swerve_like():
     pts = []
     rx, ry = 12.0, -3.5
-    # 右隣接レーンから ego レーンへ
     for t in range(6):
         pts.append((rx, ry + (t + 1) * (3.5 / 6))); rx += 2.0
     ry = 0.0
     for _ in range(3):
         pts.append((rx, ry)); rx += 2.0
-    # ego レーンから再び右隣接レーンへ戻る（蛇行）
     for t in range(6):
         pts.append((rx, ry - (t + 1) * (3.5 / 6))); rx += 2.0
     ry = -3.5
@@ -74,24 +106,40 @@ def make_swerve_like():
     return pts
 
 
-def run_case(name, points):
-    states = grid_states_from_relative_xy(points, GX, GY)
-    observed = [(s.k, s.i) for s in states]
-    model, box_id_of = build_cutin_reference(i_range=range(-2, 12), side_lanes=(-1, 1), ego_lane=0)
+def run_case(name, points, model):
+    states = zone_states_from_relative_xy(points, GY, THRESHOLDS)
+    observed = [(s.lane, s.zone) for s in states]
+    durations = [s.end_frame - s.start_frame + 1 for s in states]
     result = check_membership_cutin(model, observed)
     print(f"=== {name} ===")
-    print(f"圧縮後の状態列 (lane, position): {observed}")
+    print(f"圧縮後の状態列 (lane, position=zone), 継続フレーム数: {list(zip(observed, durations))}")
     print(result)
+    if result.is_member:
+        steps = summarize_trace(observed, durations=durations, parallel_min_frames=6)
+        print(describe_scenario(steps))
     print()
     return result
 
 
 if __name__ == "__main__":
-    r1 = run_case("cutin_like（典型的なカットイン）", make_cutin_like())
-    r2 = run_case("stays_in_own_lane（最初からego車線）", make_stays_in_own_lane())
-    r3 = run_case("swerve_like（合流後に元のレーンへ戻る＝蛇行）", make_swerve_like())
+    # 1つの参照モデルで、近距離/中距離/遠距離/並走+加速のすべてのcut-inをカバーする。
+    # position は logverify.zones の BEHIND(-1)/NEAR(0)/MEDIUM(1)/FAR(2) の4値のみ。
+    model, box_id_of = build_cutin_reference(
+        i_range=(-1, 0, 1, 2), side_lanes=(-1, 1), ego_lane=0
+    )
 
-    print("--- 期待される結果 ---")
-    print("cutin_like        : SAT   (実際:", "SAT" if r1.is_member else "UNSAT", ")")
-    print("stays_in_own_lane : UNSAT (実際:", "SAT" if r2.is_member else "UNSAT", ")")
-    print("swerve_like       : UNSAT (実際:", "SAT" if r3.is_member else "UNSAT", ")")
+    results = {}
+    results["近距離cut-in"] = run_case("近距離cut-in", make_cutin_near(), model)
+    results["中距離cut-in"] = run_case("中距離cut-in", make_cutin_medium(), model)
+    results["遠距離cut-in"] = run_case("遠距離cut-in", make_cutin_far(), model)
+    results["並走してから加速するcut-in"] = run_case(
+        "並走してから加速するcut-in", make_cutin_parallel_then_accelerate(), model
+    )
+    results["stays_in_own_lane（負例）"] = run_case(
+        "stays_in_own_lane（負例）", make_stays_in_own_lane(), model
+    )
+    results["swerve_like（負例）"] = run_case("swerve_like（負例）", make_swerve_like(), model)
+
+    print("--- まとめ（同一の参照モデルに対する判定） ---")
+    for name, r in results.items():
+        print(f"{name:32s}: {'SAT' if r.is_member else 'UNSAT'}")
