@@ -214,37 +214,81 @@ def find_distinguishing_near_far_grid(
     rx_near_range: float = 45.0,
     gy: float = 3.5,
     shrink: float = 0.5,
+    grow: float = 2.0,
     max_iters: int = 8,
+    tol: float = 0.5,
 ) -> Tuple[float, List[List[BoxKey]]]:
-    """全てのログが互いに異なる箱列になるまで、遠方のセルサイズ(rx_far_cell)を
-    細かくしていく（find_distinguishing_grid の非一様格子版）。
+    """全てのログを区別できる範囲で、遠方のセルサイズ(rx_far_cell)をできる
+    だけ大きく（粗く）とる（find_distinguishing_grid の非一様格子版。
+    「遠方のセルの統合は可能であれば行えばよい」という方針に基づき、
+    区別できる限り積極的にまとめる）。
 
-    rx_near_range・rx_near_cell・gy は固定し、rx_far_cell だけを
-    shrink 倍ずつ小さくしていく。rx_far_cell が rx_near_cell まで縮まると
-    「近くも遠くも rx_near_cell で量子化する」という、build_union_model に
-    rx_near_cell を一様な gx として渡した場合と等価な格子になる。したがって、
-    その一様格子でログを区別できるのであれば、本関数は必ず有限回の反復で
-    区別できる rx_far_cell を見つけられる（見つからない場合は
-    rx_near_range・rx_near_cell 自体を見直す必要がある、ということ）。
+    rx_near_range・rx_near_cell・gy は固定し、rx_far_cell0 を出発点として
+    2段階で探索する。
+
+    1. rx_far_cell0 で区別できない場合：従来通り、区別できるまで shrink 倍
+       ずつ細かくしていく。rx_far_cell が rx_near_cell まで縮まると
+       「近くも遠くも rx_near_cell で量子化する」という、build_union_model に
+       rx_near_cell を一様な gx として渡した場合と等価な格子になるため、
+       その一様格子でログを区別できるのであれば必ず有限回で見つかる。
+    2. rx_far_cell0 で区別できる場合：まだ粗くする余地があるかもしれない
+       ので、grow 倍ずつ大きくしながら「区別できなくなる境界」を探す。
+       境界が見つかったら、区別できる側と区別できない側の間を二分探索し、
+       tol（メートル）の精度で「区別できる最大の rx_far_cell」に絞り込む。
+       grow を max_iters 回続けても境界が見つからない場合は、そこまでで
+       一番粗かった（最後に区別できていた）値をそのまま返す。
 
     Returns:
         (rx_far_cell, sequences): 見つかった遠方セルサイズと、その格子での
-        各ログの箱列。max_iters 回試しても区別できなければ、rx_near_cell に
-        達した時点の sequences をそのまま返す（呼び出し側で
-        _sequences_distinct により重複の有無を確認できる）。
+        各ログの箱列。呼び出し側は `_sequences_distinct(sequences)` で
+        最終的に区別できているかを確認できる（build_union_model_near_far_grid
+        は内部でこれを検証し、区別できていなければ ValueError を送出する）。
     """
-    rx_far_cell = rx_far_cell0
-    sequences: List[List[BoxKey]] = []
+
+    def sequences_at(far_cell: float) -> List[List[BoxKey]]:
+        return _sequences_from_near_far_grid(trajectories, rx_near_cell, far_cell, rx_near_range, gy)
+
+    sequences0 = sequences_at(rx_far_cell0)
+    if not _sequences_distinct(sequences0):
+        # 区別できない -> 従来通り、区別できるまで細かくしていく。
+        far_cell = rx_far_cell0
+        sequences = sequences0
+        for _ in range(max_iters):
+            if far_cell <= rx_near_cell:
+                break
+            far_cell = max(rx_near_cell, far_cell * shrink)
+            sequences = sequences_at(far_cell)
+            if _sequences_distinct(sequences):
+                break
+        return far_cell, sequences
+
+    # rx_far_cell0 で区別できる -> さらに粗くできないか探索する。
+    best_far_cell, best_sequences = rx_far_cell0, sequences0
+    lo, hi = rx_far_cell0, None
+    cur = rx_far_cell0
     for _ in range(max_iters):
-        sequences = _sequences_from_near_far_grid(
-            trajectories, rx_near_cell, rx_far_cell, rx_near_range, gy
-        )
-        if _sequences_distinct(sequences):
-            return rx_far_cell, sequences
-        if rx_far_cell <= rx_near_cell:
+        cur = cur * grow
+        seqs = sequences_at(cur)
+        if _sequences_distinct(seqs):
+            lo, best_far_cell, best_sequences = cur, cur, seqs
+        else:
+            hi = cur
             break
-        rx_far_cell = max(rx_near_cell, rx_far_cell * shrink)
-    return rx_far_cell, sequences
+
+    if hi is not None:
+        # lo（区別できる）と hi（区別できない）の間を、区別できる最大値へ
+        # 二分探索で絞り込む。
+        for _ in range(max_iters):
+            if hi - lo <= tol:
+                break
+            mid = (lo + hi) / 2
+            seqs = sequences_at(mid)
+            if _sequences_distinct(seqs):
+                lo, best_far_cell, best_sequences = mid, mid, seqs
+            else:
+                hi = mid
+
+    return best_far_cell, best_sequences
 
 
 def build_union_model_near_far_grid(
