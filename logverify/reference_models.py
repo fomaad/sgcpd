@@ -94,6 +94,7 @@ distance, side-by-side driving, and acceleration into a single model):
   which init the SAT solver picks).
 """
 
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from gcpd import Model
@@ -271,3 +272,157 @@ def describe(model: Model, box_id_of: Dict[BoxKey, int]) -> str:
     id_of_box = {v: k for k, v in box_id_of.items()}
     lines.append(f"inits={[id_of_box[n] for (_, n) in model.inits]}")
     return "\n".join(lines)
+
+
+@dataclass
+class CutinReferenceScenario:
+    """参照CPDモデルと、それに対応するログの抽象化ルールを1つにまとめたもの。
+
+    これまで、参照CPD側の語彙（`i_range=(-1,0,1,2)` = BEHIND/NEAR/MEDIUM/FAR、
+    `side_lanes`, `ego_lane`）と、生ログをその語彙に丸めるための実際の
+    しきい値（`logverify.zones.ZoneThresholds` の near_max/medium_max、
+    および横方向の格子幅 gy）は、別々の場所（`build_cutin_reference` の
+    呼び出しと `ZoneThresholds(...)` の呼び出し）で、デモスクリプトを書く
+    人間が「値を合わせておく」ことに頼って別々に指定されていた
+    （例: demo_real_ajisai_log.py 参照）。値を変え忘れる、あるいは
+    i_range を BEHIND..FAR 以外に変えたのに thresholds は据え置く、
+    といった不整合が起きても、実行時までそれと気づけない。
+
+    このクラスは、「参照モデル」を、その箱構造（`model`/`box_id_of`）
+    と、ログをその箱構造の語彙に自動的に落とし込むための抽象化ルール
+    （`thresholds`/`gy`/`ego_lane`/`side_lanes`）を持つ1つの単位として
+    まとめ、`abstract()` / `check()` の2つの操作をその単位に対して
+    行えるようにする。これにより、「ログを、参照モデルの抽象度に
+    合わせて自動的に抽象化する」ことが、2つの独立した設定を人間が
+    手で同期させる作業ではなく、1つのオブジェクトに対する1回の
+    呼び出しになる。
+
+    ---
+    English:
+    Bundles a reference CPD model together with the abstraction rule used
+    to round a raw log into that model's own vocabulary.
+
+    Previously, the reference CPD's vocabulary (`i_range=(-1,0,1,2)` =
+    BEHIND/NEAR/MEDIUM/FAR, `side_lanes`, `ego_lane`) and the actual
+    thresholds used to round a raw log into that vocabulary
+    (`logverify.zones.ZoneThresholds`'s near_max/medium_max, and the
+    lateral grid width gy) were specified separately (one call to
+    `build_cutin_reference`, one call to `ZoneThresholds(...)`), relying on
+    whoever wrote the demo script to keep the two in sync by hand (see
+    demo_real_ajisai_log.py). If they drift apart -- e.g. i_range is
+    changed to something other than BEHIND..FAR but thresholds is left
+    as-is -- nothing catches it until runtime.
+
+    This class packages "a reference model" as a single unit holding both
+    its box structure (`model`/`box_id_of`) and the abstraction rule that
+    automatically maps a raw log into that box structure's vocabulary
+    (`thresholds`/`gy`/`ego_lane`/`side_lanes`), and exposes that unit's
+    two operations, `abstract()` and `check()`. This turns "automatically
+    abstract a log to match the reference model's level of abstraction"
+    from a manual synchronization task between two independent settings
+    into a single call against a single object.
+    """
+
+    model: Model
+    box_id_of: Dict[BoxKey, int]
+    thresholds: "ZoneThresholds"
+    gy: float
+    ego_lane: int
+    side_lanes: Tuple[int, ...]
+    car: str = "NPC"
+
+    def abstract(self, rel_xy: Sequence[Tuple[float, float]]) -> List["ZoneState"]:
+        """生の (rx, ry) 系列を、この参照モデル自身の語彙（BEHIND/NEAR/MEDIUM/FAR
+        × side_lanes/ego_lane）に自動的に丸め、イベント駆動で圧縮する。
+
+        ---
+        English:
+        Automatically rounds a raw (rx, ry) sequence into this reference
+        model's own vocabulary (BEHIND/NEAR/MEDIUM/FAR x
+        side_lanes/ego_lane), compressing it in an event-driven manner.
+        """
+        from logverify.zones import zone_states_from_relative_xy
+
+        return zone_states_from_relative_xy(rel_xy, self.gy, self.thresholds)
+
+    def check(self, rel_xy: Sequence[Tuple[float, float]]):
+        """生ログを自動的に抽象化し、この参照モデルに対するmembership checkまで行う。
+
+        抽象化された (lane, zone) の各値が、この参照モデルの語彙
+        （box_id_of のキー）の外に出ていた場合は、`check_membership` が
+        `unmatched_step` 付きの UNSAT として検出する（＝「参照モデルの
+        抽象度に合わせて自動的に抽象化できたか」を、SAT/UNSATとは別の
+        観点から検証したことになる）。
+
+        Returns:
+            (states, result): states は abstract() の戻り値、result は
+            logverify.membership.MembershipResult。
+
+        ---
+        English:
+        Automatically abstracts a raw log and runs a membership check
+        against this reference model.
+
+        If any abstracted (lane, zone) value falls outside this reference
+        model's own vocabulary (the keys of box_id_of), `check_membership`
+        detects it as an UNSAT with `unmatched_step` set (this amounts to
+        a check, orthogonal to SAT/UNSAT itself, of whether the log could
+        actually be abstracted to match the reference model's level of
+        abstraction).
+
+        Returns:
+            (states, result): states is abstract()'s return value, result
+            is a logverify.membership.MembershipResult.
+        """
+        from logverify.membership import check_membership_cutin
+
+        states = self.abstract(rel_xy)
+        observed = [(s.lane, s.zone) for s in states]
+        result = check_membership_cutin(self.model, observed, car=self.car)
+        return states, result
+
+
+def build_cutin_reference_scenario(
+    near_max: float = 5.0,
+    medium_max: float = 20.0,
+    gy: float = 3.5,
+    side_lanes: Sequence[int] = (-1, 1),
+    ego_lane: int = 0,
+    car: str = "NPC",
+    max_position_jump: Optional[int] = None,
+) -> CutinReferenceScenario:
+    """cut-in の参照モデルを、その抽象化ルール（distance帯のしきい値・
+    横方向の格子幅）ごと1つにまとめて構築する。
+
+    `build_cutin_reference` の `i_range` は、常に
+    `logverify.zones` の BEHIND(-1)/NEAR(0)/MEDIUM(1)/FAR(2) に固定する
+    （この2つが食い違うことを、そもそも構造的にできなくする）。
+
+    ---
+    English:
+    Builds the cut-in reference model together with its abstraction rule
+    (distance-band thresholds, lateral grid width) as a single bundle.
+
+    `build_cutin_reference`'s `i_range` is always fixed to
+    `logverify.zones`'s BEHIND(-1)/NEAR(0)/MEDIUM(1)/FAR(2) here
+    (structurally ruling out the two ever drifting apart).
+    """
+    from logverify.zones import BEHIND, NEAR, MEDIUM, FAR, ZoneThresholds
+
+    model, box_id_of = build_cutin_reference(
+        i_range=(BEHIND, NEAR, MEDIUM, FAR),
+        side_lanes=side_lanes,
+        ego_lane=ego_lane,
+        car=car,
+        max_position_jump=max_position_jump,
+    )
+    thresholds = ZoneThresholds(near_max=near_max, medium_max=medium_max)
+    return CutinReferenceScenario(
+        model=model,
+        box_id_of=box_id_of,
+        thresholds=thresholds,
+        gy=gy,
+        ego_lane=ego_lane,
+        side_lanes=tuple(side_lanes),
+        car=car,
+    )
