@@ -28,6 +28,7 @@ import time
 from logverify.multi_log_model import (
     build_union_model,
     build_union_model_near_far_grid,
+    find_distinguishing_near_far_grid,
     verify_logs_included,
     count_scenarios,
     enumerate_scenarios,
@@ -171,11 +172,24 @@ if __name__ == "__main__":
     # 非一様な格子での統合モデル（11.6節：格子設計の見直し） ---
     print("=== Egoに近い部分は細かく、遠い部分はまとめる非一様格子での統合 ===")
     t6 = time.time()
+    # rx_far_cell は指定しない（デフォルトのrx_near_cell*2から出発し、
+    # auto_grid=Trueにより全ログを区別できるまで自動的に細分化される）。
+    # rx_near_range=45m は、中距離帯のログ同士が区別できなくなる境界を
+    # 実際に確認しながら選んだ値（11.7節）。
+    far_cell_used, _ = find_distinguishing_near_far_grid(
+        list(logs.values()), rx_near_cell=5.0, rx_near_range=45.0, gy=3.5
+    )
     mlm_nf = build_union_model_near_far_grid(
-        list(logs.values()), rx_near_cell=5.0, rx_far_cell=10.0, rx_near_range=45.0, gy=3.5
+        list(logs.values()),
+        rx_near_cell=5.0,
+        rx_far_cell=far_cell_used,
+        rx_near_range=45.0,
+        gy=3.5,
+        auto_grid=False,  # 上ですでに区別できる遠方セルサイズを見つけているので再探索不要
     )
     t7 = time.time()
     print(f"統合モデル構築にかかった時間: {t7 - t6:.2f}秒")
+    print(f"自動選択された遠方セルサイズ: {far_cell_used}m  (近傍セルサイズ: 5.0m, 境界: 45.0m)")
     print(f"箱の数: {len(mlm_nf.model.boxes)}  (一様格子では{len(mlm.model.boxes)}だった)")
     print(f"max_step: {mlm_nf.model.max_step}  (一様格子では{mlm.model.max_step}だった)")
 

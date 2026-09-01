@@ -189,37 +189,13 @@ def build_union_model(
     return MultiLogModel(model=m, box_id_of=box_id_of, sequences=sequences, gx=gx, gy=gy)
 
 
-def build_union_model_near_far_grid(
+def _sequences_from_near_far_grid(
     trajectories: Sequence[Sequence[Tuple[float, float]]],
     rx_near_cell: float,
     rx_far_cell: float,
     rx_near_range: float,
-    gy: float = 3.5,
-    car: str = "NPC",
-) -> MultiLogModel:
-    """Egoからの縦方向距離(rx)について、非一様な格子で統合モデルを作る。
-
-    「Egoに近い部分は今まで通り区別し、遠い部分はまとめてよい」という
-    考え方（11.6節）を反映したもの。build_union_model のように格子を
-    自動細分化はせず、near/far のセルサイズと、どこまでを「近い」と
-    するかの境界(rx_near_range)を呼び出し側が指定する。
-
-    - |rx| <= rx_near_range の範囲は rx_near_cell（例: build_union_model の
-      デフォルトと同じ 5.0m など）で従来通り細かく区別する。
-    - |rx| > rx_near_range の範囲は rx_far_cell（rx_near_cell より大きい
-      値、例: 20mや30m）でまとめる。これにより遠方の箱数・
-      max_step が減り、モデル全体のサイズを抑えられる
-      （Egoを同期させたワールド座標系アニメーション（11.5節）の
-      スケーラビリティ改善に有効）。
-    - レーン方向(ry)は従来通り一様な gy を使う（レーン数はもともと
-      少なく、遠方でまとめる恩恵が小さいため）。
-
-    自動細分化は行わないため、rx_near_cell/rx_far_cell/rx_near_range/gy
-    の組み合わせによっては、異なるログが同じ箱列に潰れてしまう
-    （区別できなくなる）可能性がある。呼び出し側で
-    `MultiLogModel.sequences` の重複有無（本モジュールの
-    `_sequences_distinct` 相当）を確認すること。
-    """
+    gy: float,
+) -> List[List[BoxKey]]:
     sequences: List[List[BoxKey]] = []
     for traj in trajectories:
         rxs = [p[0] for p in traj]
@@ -228,6 +204,118 @@ def build_union_model_near_far_grid(
             rxs, rys, rx_near_cell, rx_far_cell, rx_near_range, gy
         )
         sequences.append([(s.k, s.i) for s in states])
+    return sequences
+
+
+def find_distinguishing_near_far_grid(
+    trajectories: Sequence[Sequence[Tuple[float, float]]],
+    rx_near_cell: float = 5.0,
+    rx_far_cell0: float = 10.0,
+    rx_near_range: float = 45.0,
+    gy: float = 3.5,
+    shrink: float = 0.5,
+    max_iters: int = 8,
+) -> Tuple[float, List[List[BoxKey]]]:
+    """全てのログが互いに異なる箱列になるまで、遠方のセルサイズ(rx_far_cell)を
+    細かくしていく（find_distinguishing_grid の非一様格子版）。
+
+    rx_near_range・rx_near_cell・gy は固定し、rx_far_cell だけを
+    shrink 倍ずつ小さくしていく。rx_far_cell が rx_near_cell まで縮まると
+    「近くも遠くも rx_near_cell で量子化する」という、build_union_model に
+    rx_near_cell を一様な gx として渡した場合と等価な格子になる。したがって、
+    その一様格子でログを区別できるのであれば、本関数は必ず有限回の反復で
+    区別できる rx_far_cell を見つけられる（見つからない場合は
+    rx_near_range・rx_near_cell 自体を見直す必要がある、ということ）。
+
+    Returns:
+        (rx_far_cell, sequences): 見つかった遠方セルサイズと、その格子での
+        各ログの箱列。max_iters 回試しても区別できなければ、rx_near_cell に
+        達した時点の sequences をそのまま返す（呼び出し側で
+        _sequences_distinct により重複の有無を確認できる）。
+    """
+    rx_far_cell = rx_far_cell0
+    sequences: List[List[BoxKey]] = []
+    for _ in range(max_iters):
+        sequences = _sequences_from_near_far_grid(
+            trajectories, rx_near_cell, rx_far_cell, rx_near_range, gy
+        )
+        if _sequences_distinct(sequences):
+            return rx_far_cell, sequences
+        if rx_far_cell <= rx_near_cell:
+            break
+        rx_far_cell = max(rx_near_cell, rx_far_cell * shrink)
+    return rx_far_cell, sequences
+
+
+def build_union_model_near_far_grid(
+    trajectories: Sequence[Sequence[Tuple[float, float]]],
+    rx_near_cell: float = 5.0,
+    rx_far_cell: Optional[float] = None,
+    rx_near_range: float = 45.0,
+    gy: float = 3.5,
+    car: str = "NPC",
+    auto_grid: bool = True,
+) -> MultiLogModel:
+    """Egoからの縦方向距離(rx)について、非一様な格子で統合モデルを作る。
+
+    「Egoに近い部分は今まで通り区別し、遠い部分はまとめてよい」という
+    考え方（11.6節）を反映したもの。
+
+    - |rx| <= rx_near_range の範囲は rx_near_cell（例: build_union_model の
+      デフォルトと同じ 5.0m）で従来通り細かく区別する。
+    - |rx| > rx_near_range の範囲は rx_far_cell（rx_near_cell より大きい
+      値、例: 10mや20m）でまとめる。これにより遠方の箱数・
+      max_step が減り、モデル全体のサイズを抑えられる
+      （Egoを同期させたワールド座標系アニメーション（11.5節）の
+      スケーラビリティ改善に有効）。
+    - レーン方向(ry)は従来通り一様な gy を使う（レーン数はもともと
+      少なく、遠方でまとめる恩恵が小さいため）。
+
+    build_union_model と同様、rx_near_range・rx_far_cell の選び方を
+    誤ると、異なるログが同じ箱列に潰れてしまう（区別できなくなる）
+    危険がある。実際、rx_near_range=25m・rx_far_cell=10mで19本の合成ログを
+    試したところ、中距離帯のログ2組が区別できなくなる事例が起きた
+    （11.7節）。この危険を避けるため:
+
+    - auto_grid=True（デフォルト）の場合、rx_far_cell を省略すると
+      `find_distinguishing_near_far_grid` を使い、全ログが区別できるまで
+      rx_far_cell を自動的に細かくする（rx_near_range・rx_near_cellは
+      呼び出し側の指定を尊重し、変更しない）。rx_far_cell を明示的に
+      指定した場合は、それを初期値として自動細分化する。
+    - auto_grid=False の場合、指定された rx_far_cell（省略時は
+      rx_near_cell の2倍）をそのまま使う。
+    - いずれの場合も、最終的に得られた格子で全ログを区別できているかを
+      本関数の内部で検証し、区別できていなければ build_union_model と
+      同様に ValueError を送出する（`sequences` の重複を黙って
+      見過ごすことはない）。
+    """
+    if rx_far_cell is None:
+        rx_far_cell0 = rx_near_cell * 2
+    else:
+        rx_far_cell0 = rx_far_cell
+
+    if auto_grid:
+        rx_far_cell_final, sequences = find_distinguishing_near_far_grid(
+            trajectories,
+            rx_near_cell=rx_near_cell,
+            rx_far_cell0=rx_far_cell0,
+            rx_near_range=rx_near_range,
+            gy=gy,
+        )
+    else:
+        rx_far_cell_final = rx_far_cell0
+        sequences = _sequences_from_near_far_grid(
+            trajectories, rx_near_cell, rx_far_cell_final, rx_near_range, gy
+        )
+
+    if not _sequences_distinct(sequences):
+        raise ValueError(
+            f"非一様格子 (rx_near_cell={rx_near_cell}, rx_near_range={rx_near_range}, "
+            f"rx_far_cell={rx_far_cell_final}, gy={gy}) まで細かくしても全ログを"
+            "区別できませんでした。rx_near_range を広げる（区別できない箇所を"
+            "近傍側に含める）か、auto_grid=True で max_iters を増やしてやり直して"
+            "ください。"
+        )
 
     m, box_id_of = _model_from_sequences(sequences, car)
     # gx はもはや単一の値ではないため、代表値として rx_near_cell を記録しておく
