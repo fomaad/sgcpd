@@ -316,6 +316,8 @@ swerve_like       : UNSAT
 
 ここまでで、ログからCPDを構築・利用する方法が複数出てきた。それぞれ目的が異なるため、どれか1つに統合するのではなく、**3つの独立した方法として`logverify/`（および`vendor/`）に併存させる**方針とする。
 
+**咲川氏のvendorコードへの依存について**: 方法B・方法C（`logverify/`配下）は、咲川氏の`vendor/trajectory_abstraction/`配下のコードには一切依存せず、独立に実装している。咲川氏のコードを使うのは方法A（`vendor/trajectory_abstraction/src/cpd_bridge.py`）のみである。なお、実装の初期段階で`logverify/grid_bridge.py`に咲川氏の座標正規化関数（`normalize_coordinates`等）を再利用する`grid_states_from_json`関数を用意していたが、実際にはどの方法でも使われておらず（合成トラジェクトリでのテストに留まっていたため）、方法B・Cをvendorコードから完全に独立させる方針のもと削除した。実データ（AJISAIログJSON）からego基準の相対座標を取り出す部分が必要になった際は、`logverify/`内で独立に実装する。
+
 | | 方法A（既存） | 方法B | 方法C |
 |---|---|---|---|
 | 実装 | `vendor/trajectory_abstraction/src/cpd_bridge.py`（第9節） | `logverify/reference_models.py` + `logverify/zones.py`（第10節） | `logverify/multi_log_model.py`（本節） |

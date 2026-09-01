@@ -2,32 +2,29 @@
 グリッドベースの抽象化アダプタ。
 
 Autoware/AJISAIログ（あるいは任意の ego/NPC の時系列座標）を、
-ego中心・進行方向基準に正規化した上で、指定したセルサイズ (gx, gy) の
-格子に離散化し、CPD の (position=i, lane=k) にそのまま対応する
-整数列を作る。
+ego中心・進行方向基準の相対座標 (rx, ry) から、指定したセルサイズ
+(gx, gy) の格子に離散化し、CPD の (position=i, lane=k) にそのまま
+対応する整数列を作る。
 
-咲川氏の名前付き領域抽象化 (vendor/trajectory_abstraction/src/abstraction_15area.py 等) と
-違い、ここでは「参照CPDを書くときに使った粒度」をそのまま使う。
+咲川氏の名前付き領域抽象化 (vendor/trajectory_abstraction/src/abstraction_15area.py 等)
+とは異なり、ここでは「参照CPDを書くときに使った粒度」をそのまま使う。
 つまり、gx/gy は「1レーンの幅」「1箱に相当する縦方向の距離」を
 CPDモデルの設計者が自分で選ぶためのパラメータである。
 
-座標の正規化 (ego進行方向基準への回転) は咲川氏の
-vendor/trajectory_abstraction/src/abstraction_grid.py の
-normalize_coordinates / extract_coordinates_from_json をそのまま再利用する。
+咲川氏のvendor/trajectory_abstraction配下のコード（座標の正規化や
+JSON読み込みを含む）には一切依存していない（logverify全体の方針として、
+方法B・方法Cはvendorのコードを使わず独立に実装している。vendorを使う
+のは方法A＝vendor/trajectory_abstraction/src/cpd_bridge.pyのみ）。
+実データ（AJISAIログJSON）からego基準の相対座標 (rx, ry) を取り出す
+部分は、必要になった時点で本モジュールの中に独立に実装する
+（`grid_states_from_relative_xy` はすでに相対座標が分かっている場合の
+入口。JSON読み込み自体はまだ用意していない）。
 """
 
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
-
-from vendor.trajectory_abstraction.src.abstraction_grid import (
-    extract_coordinates_from_json,
-    load_json_data,
-    normalize_coordinates,
-    normalize_velocities,
-    calculate_relative_velocity,
-)
 
 
 @dataclass
@@ -83,19 +80,6 @@ def compress_to_grid_states(
         prev_ik = (i, k)
 
     return states
-
-
-def grid_states_from_json(input_path: str, gx: float, gy: float) -> List[GridState]:
-    """AJISAI形式のログJSON（あるいは groundtruth_kinematic を持つ本体ログ）から
-    圧縮済みグリッド状態列を作る。"""
-    data = load_json_data(input_path)
-    ego_c, npc_c, ego_v, npc_v, ts, ids = extract_coordinates_from_json(data)
-    if len(ts) == 0:
-        return []
-    ego_n, npc_n, rot = normalize_coordinates(ego_c, npc_c)
-    rxs = [None if c[0] is None or (isinstance(c[0], float) and np.isnan(c[0])) else c[0] for c in npc_n]
-    rys = [None if c[1] is None or (isinstance(c[1], float) and np.isnan(c[1])) else c[1] for c in npc_n]
-    return compress_to_grid_states(rxs, rys, gx, gy)
 
 
 def grid_states_from_relative_xy(
