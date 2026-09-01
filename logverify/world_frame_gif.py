@@ -2,22 +2,31 @@
 logverify のCPDモデルから列挙したシナリオを、「ワールド座標系」
 （絶対座標系）でアニメーション化する。
 
-gif_viz.py との違い:
-    gif_viz.render_scenarios_gif は、モデルが持つ (lane, position) を
-    そのまま「Ego基準の相対座標」の格子とみなして描画するため、
-    Ego を lane=0, position=0 に静止した参照点として描いていた。
-    しかし実際にはEgoも道路上を前進しており、position が変化しないのは
-    「NPCとの相対距離」を状態として使っているからに過ぎない。
+## 経緯（v1 -> v2）
 
-    このモジュールでは、
-        1. Ego自身が一定速度で前進する（ego_world_position(s) = s * ego_speed）
-        2. NPCの絶対位置 = Egoの絶対位置（前進分） + モデルが持つ相対オフセット
-    として、固定カメラ（ワールド座標系に固定、Egoを追従しない）のまま、
-    Egoが前進し、NPCがEgoに対して相対的に動く様子を1つのアニメーションで表す。
+v1は、モデルが持つ (lane, position) を「Ego基準の相対座標」の格子と
+みなして描画する gif_viz.py に対し、「Egoが前進する」という事実を
+アニメーション側だけの後付け計算（ego_world_position = step * ego_speed）
+として表現していた。しかしこれはCPDモデル自体にはEgoという car が
+存在しない、可視化上のトリックに過ぎず、「オリジナルの英語の論文では
+CPD自体がEgoの前進をモデル化しているはず」というユーザ指摘の通り、
+論文（Fig.2/Fig.7）のCPDはEgoも他の車と同じく1つの car として、
+自分の箱列を持つ形でモデル化されている。
 
-    lane（横方向）は元々Ego基準の相対値（-1, 0, 1 など）なので、そのまま
-    「Egoからの左右オフセット」として使う（Ego自身は lane=0 に固定）。
-    position（縦方向）だけ、Egoの前進量を足し込んで絶対座標に変換する。
+v2では、logverify.ego_car.with_ego_track を使ってEgoを実際にCPDの
+car として追加したモデルを構築し、gcpd.enum_ss で列挙されるシナリオ
+そのものにEgoの箱列を含める。Egoの前進はNPCの遷移と同期遷移(strans)で
+結び付けられており（詳細は ego_car.py のdocstring参照）、
+「NPCが実際に距離帯・車線を変える瞬間には必ずEgoも1つ前進する」
+「NPCが変化しないステップはEgoも変化しない」という形で、CPDが
+表現するシナリオの一部として解かれる。
+
+NPC側の position は（方法B・Cとも）Egoとの相対距離をそのまま表して
+いるため、1枚の固定カメラの絵として描画する際には、
+    NPCの絶対position = Ego(box).position（=これまでの同期前進の回数）
+                         + NPCの相対position
+として画面上の座標に変換する（この変換自体は見た目のためのもので、
+CPDが表現するシナリオ集合の意味＝相対距離ベースを変えるものではない）。
 """
 
 import os
@@ -27,47 +36,54 @@ import gcpd
 from gcpd import Model
 from gcpd_gif import VehicleGif
 
+from logverify.ego_car import with_ego_track
 from logverify.membership import reset_solver
 
 
 HistoryEntry = Tuple[str, int, int, int, int]  # (car, box, lane, position, step)
 
 
-def strip_start_box(hs: Sequence[HistoryEntry], start_box: int = -1) -> List[HistoryEntry]:
-    """ダミー開始箱（step 0 にのみ出現する）を取り除き、ステップ番号を1つ詰める。"""
-    return [(c, n, l, p, s - 1) for (c, n, l, p, s) in hs if n != start_box]
+def strip_pre_scenario_step(hs: Sequence[HistoryEntry]) -> List[HistoryEntry]:
+    """ステップ0（NPCがダミー開始箱にいる助走区間であり、Egoにとっても
+    まだ本番前の初期位置に相当する）を丸ごと取り除き、ステップ番号を1つ詰める。"""
+    return [(c, n, l, p, s - 1) for (c, n, l, p, s) in hs if s != 0]
 
 
 def render_world_frame_gif(
     model: Model,
     output_prefix: str,
-    start_box: int = -1,
     ego_car: str = "Ego",
+    ego_lane: int = 0,
+    ego_speed: float = 1.0,
     ego_color: Tuple[int, int, int] = (30, 110, 230),
     npc_colors: Optional[dict] = None,
     combined: bool = True,
-    ego_speed: float = 1.0,
     grid_scale: int = 120,
     a_res: int = 8,
     max_step: Optional[int] = None,
     num_model: int = 10_000,
 ) -> List[str]:
-    """model から gcpd.enum_ss でシナリオを列挙し、Egoが前進するワールド座標系の
-    GIFアニメーションとして書き出す。
+    """model に Ego を car として追加した上で gcpd.enum_ss でシナリオを列挙し、
+    Egoが前進するワールド座標系のGIFアニメーションとして書き出す。
 
     Args:
         model: logverify.reference_models.build_cutin_reference や
-            logverify.multi_log_model.build_union_model が返す gcpd.Model。
+            logverify.multi_log_model.build_union_model が返す gcpd.Model
+            （NPCを car として持つ、Egoを含まないモデル）。この引数自体は
+            変更されない（with_ego_track が新しいモデルを作る）。
         output_prefix: 出力ファイル名の接頭辞（拡張子 .gif は自動で付く）。
-        ego_speed: Egoが1ステップで前進する量（モデルのposition/gridと同じ単位の
-            格子セル数）。相対距離側の変化量と同程度になるよう、デフォルトは1。
+        ego_lane: Egoに割り当てるlaneの値（描画上の固定レーン、デフォルト0）。
+        ego_speed: Egoの箱番号（=NPCの遷移と同期した前進回数）を画面上の
+            格子セル数に変換する際のスケール（デフォルト1＝1回の同期前進=1セル）。
         combined: True なら全シナリオを1本のGIFにまとめる（gen_gif_all）。
             False ならシナリオごとに別ファイルにする。
-        max_step: 列挙するシナリオの長さの上限。logverify.reference_models の
-            モデルは max_step=0 のまま構築される（membership check時に観測系列の
-            長さに合わせて設定される想定のため）ので、可視化する際は明示的に
-            指定する必要がある。None の場合は model.max_step をそのまま使う
-            （方法Cの統合モデルはログの長さから自動設定済みなので通常は省略でよい）。
+        max_step: Egoの箱列の長さ、およびモデル全体で列挙するシナリオの
+            長さの上限。logverify.reference_models のモデルは max_step=0 の
+            まま構築される（membership check時に観測系列の長さに合わせて
+            設定される想定のため）ので、可視化する際は明示的に指定する
+            必要がある。None の場合は model.max_step をそのまま使う
+            （方法Cの統合モデルはログの長さから自動設定済みなので通常は
+            省略でよい）。
         num_model: 列挙するシナリオ数の上限（gcpd.enum_ss に渡す）。方法Bの
             参照CPDのように非決定性が大きいモデルでは全列挙が非常に大きく
             なりうるため、可視化用には小さい値（例: 6）に絞るとよい。
@@ -75,43 +91,48 @@ def render_world_frame_gif(
     Returns:
         生成されたGIFファイルのパスのリスト。
     """
-    if max_step is not None:
-        model.max_step = max_step
-    reset_solver()
-    gcpd.init(model)
-    gcpd.add_pos(model)
-    gcpd.add_lane(model)
-    gcpd.add_init(model)
-    gcpd.add_trans(model)
-    model.num_model = num_model
-    history = gcpd.enum_ss(model)
+    aug_model = with_ego_track(model, max_step=max_step, ego_lane=ego_lane, ego_car=ego_car)
+    aug_model.num_model = num_model
 
-    stripped = [strip_start_box(hs, start_box) for hs in history]
+    reset_solver()
+    gcpd.init(aug_model)
+    gcpd.add_pos(aug_model)
+    gcpd.add_lane(aug_model)
+    gcpd.add_init(aug_model)
+    gcpd.add_trans(aug_model)
+    history = gcpd.enum_ss(aug_model)
+
+    stripped = [strip_pre_scenario_step(hs) for hs in history]
     stripped = [hs for hs in stripped if hs]
     if not stripped:
         raise ValueError("可視化できるシナリオがありません（列挙結果が空です）")
 
-    # シナリオごとに、ステップ -> (lane, position) の対応を作る
-    scenarios_by_step: List[Dict[int, Tuple[int, int]]] = []
+    npc_car = model.cars[0]
+
+    # シナリオごとに、ステップ -> {car: (lane, position)} の対応を作る
+    # （Ego, NPC 双方の実際に solve された箱がここに入る）
+    scenarios_by_step: List[Dict[int, Dict[str, Tuple[int, int]]]] = []
     for hs in stripped:
-        by_step: Dict[int, Tuple[int, int]] = {}
+        by_step: Dict[int, Dict[str, Tuple[int, int]]] = {}
         for (c, n, l, p, s) in hs:
-            by_step[s] = (l, p)
+            by_step.setdefault(s, {})[c] = (l, p)
         scenarios_by_step.append(by_step)
 
-    # 各シナリオについて、Egoの絶対前進位置を足し込んでワールド座標を計算する
+    # NPCのpositionはEgoとの相対距離なので、Ego自身の前進量（実際にCPDが
+    # 解として持つEgo(box).position）を足し込んでワールド座標に変換する。
     world_scenarios: List[List[HistoryEntry]] = []
     for by_step in scenarios_by_step:
         max_s = max(by_step.keys())
         combined_hs: List[HistoryEntry] = []
-        last_lp = None
         for s in range(max_s + 1):
-            ego_pos = s * ego_speed
-            lane_rel, pos_rel = by_step.get(s, last_lp)
-            last_lp = (lane_rel, pos_rel)
-            npc_world_pos = ego_pos + pos_rel
-            combined_hs.append((model.cars[0], 0, lane_rel, round(npc_world_pos), s))
-            combined_hs.append((ego_car, 0, 0, round(ego_pos), s))
+            entries = by_step.get(s, {})
+            _, ego_pos_v = entries.get(ego_car, (ego_lane, 0))
+            ego_world_pos = ego_pos_v * ego_speed
+            if npc_car in entries:
+                npc_lane_v, npc_pos_rel = entries[npc_car]
+                npc_world_pos = ego_world_pos + npc_pos_rel
+                combined_hs.append((npc_car, 0, npc_lane_v, round(npc_world_pos), s))
+            combined_hs.append((ego_car, 0, ego_lane, round(ego_world_pos), s))
         world_scenarios.append(combined_hs)
 
     # 全シナリオを通した lane/position の範囲を求め、グリッドサイズを共通化する
