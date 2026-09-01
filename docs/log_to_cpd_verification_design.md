@@ -388,3 +388,7 @@ NPC側の position は（方法B・Cとも）Egoとの相対距離をそのま�
 - 本節の同期は`model.ntrans`（通常遷移）のみを対象としている。現状の方法B・Cのモデルはntransしか使っていないため問題にならないが、将来`ctrans`/`netrans`等を使うモデルにEgoを追加する場合は`ego_car.py`の拡張が必要になる。
 
 今後の課題として、`ego_speed`を実データ（AJISAIログの座標変換前の絶対座標、あれば）から推定し、より物理的に正確なアニメーションにすることが挙げられる。
+
+#### モデル構造図へのEgoの反映
+
+11.4節の`plot_model_paper_style`はNPC側のスイムレーンしか描かないため、Egoが実際にCPDの car として存在することを図でも確認できるよう、`logverify/model_diagram.py`に`plot_model_with_ego_paper_style`を追加した。NPC側のスイムレーンの上に、Egoの箱列（Ego(0)->Ego(1)->...）を緑色の帯で追加している。同期遷移（strans）は「NPCのntrans1本ごとにEgoの箱番号すべてとの組」を機械的に生成しており、実際の組み合わせ数は膨大（`|ntrans| × ego_max_step`）になるため、1本ずつ線で結ぶと図が読めなくなる。そのため、同期の事実は図中の注記テキストで示すに留めている。`logverify/demo_model_diagram_with_ego.py`で方法B・方法Cの両方について生成・確認した。
