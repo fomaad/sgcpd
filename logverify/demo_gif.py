@@ -3,6 +3,14 @@ logverify のCPDモデル（方法B・方法C）を gcpd_gif.py でGIFアニメ�
 
 実行方法:
     cd sgcpd && python3 -m logverify.demo_gif
+
+---
+English:
+Demo that turns logverify's CPD models (Method B and Method C) into GIF
+animations using gcpd_gif.py.
+
+How to run:
+    cd sgcpd && python3 -m logverify.demo_gif
 """
 
 import os
@@ -27,20 +35,23 @@ if __name__ == "__main__":
         "cutin_right_far": log_cutin_right_far(),
     }
     mlm = build_union_model(list(logs.values()))
-    print(f"格子: gx={mlm.gx}, gy={mlm.gy}, 箱数={len(mlm.model.boxes)}")
+    print(f"Grid: gx={mlm.gx}, gy={mlm.gy}, number of boxes={len(mlm.model.boxes)}")
 
     # シナリオごとに別々のGIFを作る（どのログがどう動くか個別に確認しやすい）
+    # (English) Create a separate GIF per scenario (makes it easy to check
+    # how each log moves individually).
     paths = render_scenarios_gif(
         mlm.model, os.path.join(OUT_DIR, "multi_log"), combined=False
     )
-    print("生成されたGIF（シナリオごと）:")
+    print("Generated GIFs (per scenario):")
     for p in paths:
         print(" ", p, os.path.getsize(p), "bytes")
 
     # 全シナリオをまとめた1本のGIFも作る
+    # (English) Also create a single GIF combining all scenarios.
     paths_all = render_scenarios_gif(
         mlm.model, os.path.join(OUT_DIR, "multi_log_all"), combined=True
     )
-    print("生成されたGIF（全シナリオまとめ）:")
+    print("Generated GIF (all scenarios combined):")
     for p in paths_all:
         print(" ", p, os.path.getsize(p), "bytes")

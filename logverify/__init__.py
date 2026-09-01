@@ -15,3 +15,26 @@
 # 整数の (position=i, lane=k) がそのまま得られる。参照CPDモデル (reference_models.py) は
 # 同じ (gx, gy) を前提にした box グラフとして書かれており、
 # membership.check_membership() で両者を突き合わせる。
+#
+# (English)
+# logverify: a collection of modules that translate logs (Autoware/AJISAI) into
+# the vocabulary of CPD/GCPD (gcpd.py), and perform conformance checking
+# (membership check) against a "reference CPD model".
+#
+# Sakikawa's named-region abstraction (vendor/trajectory_abstraction/src/abstraction_*area.py)
+# is a fixed abstraction scheme optimized for "classifying and summarizing logs",
+# and requires an arbitrary lookup table (cpd_bridge.REGION_TO_LANE_POS) to be
+# inserted for converting region names -> (lane, position).
+#
+# On the other hand, when we want to write down a "reference CPD" representing a
+# cut-in directly ourselves and judge SAT/UNSAT as to whether a log satisfies it,
+# it is more natural and rigorous to align the granularity of the log's
+# discretization with the granularity of (lane, position) used when defining the
+# reference CPD, from the very start.
+#
+# grid_bridge.py provides exactly a "grid-based abstraction" for that purpose:
+# once the vertical/horizontal cell sizes (gx, gy) are chosen, an integer
+# (position=i, lane=k) is obtained directly for any time in the log. The
+# reference CPD model (reference_models.py) is written as a box graph that
+# assumes the same (gx, gy), and membership.check_membership() reconciles the
+# two.

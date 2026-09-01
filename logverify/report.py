@@ -17,6 +17,28 @@ BEHIND(-1) / NEAR(0) / MEDIUM(1) / FAR(2) に丸められた順序値なので�
   - 並走とみなせる区間の有無（同じレーン・同じ距離帯に複数状態留まる）
   - 合流が起きたタイミング・距離帯
 を日本語のサマリ文字列にする。
+
+---
+English:
+A utility that summarizes, in human-readable form, which "behavior" of a
+reference CPD (cut-in) an observed log corresponds to, once the log has been
+judged SAT against that model.
+
+In a reference CPD built with reference_models.build_cutin_reference,
+(lane, position) corresponds one-to-one with a box (box_id_of is a bijection),
+so once an observation sequence [(lane_0, position_0), ...] is given, a SAT
+verdict is itself a witness of "which boxes were traversed in the reference
+model". In other words, for this model specifically, "whether this
+observation sequence is in the model's language" (SAT/UNSAT) and "which path
+it took, given that it is" come from the same information.
+
+Since position has already been rounded by logverify.zones into the ordinal
+values BEHIND(-1) / NEAR(0) / MEDIUM(1) / FAR(2), here we simply look up that
+label and turn the following into a Japanese summary string:
+  - the distance band it started from
+  - whether there was a stretch that can be regarded as driving in parallel
+    (staying in multiple states in the same lane and same distance band)
+  - the timing and distance band at which merging occurred
 """
 
 from dataclasses import dataclass
@@ -57,6 +79,24 @@ def summarize_trace(
     「並走」は状態が何個続いたかではなく、1状態がどれだけ長く継続したか
     （durations、logverify.zones.ZoneState の end_frame - start_frame + 1）
     で判定する。durations を渡さない場合はこの判定をスキップする。
+
+    ---
+    English:
+    Converts an observation sequence [(lane, position), ...] into a list of
+    ScenarioStep.
+
+    - is_side_lane: whether lane != ego_lane.
+    - event="merge": the state where ego_lane was entered for the first time
+      (the moment of merging).
+    - event="parallel": assigned when the duration (in frames) of staying in
+      an adjacent lane is at least parallel_min_frames (i.e. a stretch that
+      appears to be driving in parallel at matched speed).
+
+    Since position is rounded by logverify.zones into near/medium/far, a
+    "parallel" stretch is judged not by how many states in a row occurred,
+    but by how long a single state persisted (durations, i.e.
+    logverify.zones.ZoneState's end_frame - start_frame + 1). If durations is
+    not passed, this judgment is skipped.
     """
     steps: List[ScenarioStep] = []
     merged = False

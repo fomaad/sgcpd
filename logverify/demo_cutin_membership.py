@@ -1,5 +1,4 @@
-"""
-参照CPD（cut-in）に対する適合性検証 + シナリオ分類のデモ。
+"""参照CPD（cut-in）に対する適合性検証 + シナリオ分類のデモ。
 
 実際のAJISAIログ（Boxで配布、リポジトリには同梱しない）が手元にない環境でも
 パイプライン全体を検証できるよう、ego基準の相対座標 (rx, ry) を
@@ -24,6 +23,38 @@ zone_states_from_relative_xy(rel_xy, gy, thresholds) に、
 
 実行方法:
     cd sgcpd && python3 -m logverify.demo_cutin_membership
+
+---
+English:
+Demo for conformance checking against a reference CPD (cut-in) plus scenario
+classification.
+
+Since a real AJISAI log (distributed via Box, not bundled with this
+repository) is not always available, this demo exercises the whole pipeline
+using hand-crafted synthetic trajectories of ego-relative coordinates
+(rx, ry).
+
+Variations added in v0.4:
+  - cut-ins starting at a near / medium / far distance and then merging in
+  - a cut-in that first matches speed and drives alongside in the adjacent
+    lane for a while, then accelerates and merges in
+  All of these are expressed as different satisfying solutions (witnesses)
+  of the very same reference CPD (a single call to build_cutin_reference).
+  This is the strength of CPD: variations such as "distance band, parallel
+  driving, acceleration" can all be written into one model.
+
+  Rounding position down to the small set of ordered values from
+  logverify.zones (near/medium/far(+behind)) instead of using the raw grid
+  keeps the number of boxes constant regardless of the distance range,
+  which keeps the solver fast (with the raw grid, the number of boxes grows
+  proportionally to the distance range and the number of transitions
+  explodes on the order of the square of the box count).
+
+For real data, simply pass a coordinate-normalized (rx, ry) sequence to
+zone_states_from_relative_xy(rel_xy, gy, thresholds) in logverify/zones.py.
+
+How to run:
+    cd sgcpd && python3 -m logverify.demo_cutin_membership
 """
 
 from logverify.membership import check_membership_cutin
@@ -32,6 +63,7 @@ from logverify.report import summarize_trace, describe_scenario
 from logverify.zones import zone_states_from_relative_xy, ZoneThresholds
 
 GY = 3.5  # 車線幅(m)。 lane=0 が自車線、lane=+-1 が隣接レーン。
+# (English) Lane width (m). lane=0 is the ego lane, lane=+-1 are the adjacent lanes.
 THRESHOLDS = ZoneThresholds(near_max=5.0, medium_max=20.0)
 
 
@@ -46,6 +78,7 @@ def _lane_change_points(rx0, ry0, ry1, rx_step, n):
 
 def make_cutin_near():
     # ego のすぐ横（近距離）から合流する
+    # (English) Merges in from right beside ego (near distance).
     pts = [(2.0, -3.5), (3.0, -3.5)]
     lane_pts, rx = _lane_change_points(4.0, -3.5, 0.0, 1.0, 4)
     pts += lane_pts
@@ -71,11 +104,15 @@ def make_cutin_far():
 
 def make_cutin_parallel_then_accelerate():
     # 隣接レーンでegoとほぼ横並びのまま速度を合わせて並走 -> 加速して前方へ抜けつつ合流
+    # (English) Drives alongside ego in the adjacent lane at matched speed, staying
+    # (English) roughly level -> then accelerates, pulls ahead, and merges in.
     pts = []
     rx, ry = 1.0, -3.5
-    for _ in range(6):  # 並走区間（ほぼ同じ rx のまま複数状態）
+    for _ in range(6):  # 並走区間（ほぼ同じ rx のまま複数状態） (English) parallel-driving segment (multiple states at nearly the same rx)
         pts.append((rx, ry)); rx += 0.3
     # 加速して一気に前方（遠距離）へ抜けながら合流（distance zoneが大きく飛ぶ）
+    # (English) Accelerates and shoots forward (to a far distance) while merging in
+    # (English) (the distance zone jumps by a large amount).
     lane_pts, rx = _lane_change_points(rx, -3.5, 0.0, 8.0, 3)
     pts += lane_pts
     pts += [(rx, 0.0), (rx + 25.0, 0.0)]
@@ -112,7 +149,7 @@ def run_case(name, points, model):
     durations = [s.end_frame - s.start_frame + 1 for s in states]
     result = check_membership_cutin(model, observed)
     print(f"=== {name} ===")
-    print(f"圧縮後の状態列 (lane, position=zone), 継続フレーム数: {list(zip(observed, durations))}")
+    print(f"Compressed state sequence (lane, position=zone), frame durations: {list(zip(observed, durations))}")
     print(result)
     if result.is_member:
         steps = summarize_trace(observed, durations=durations, parallel_min_frames=6)
@@ -124,22 +161,25 @@ def run_case(name, points, model):
 if __name__ == "__main__":
     # 1つの参照モデルで、近距離/中距離/遠距離/並走+加速のすべてのcut-inをカバーする。
     # position は logverify.zones の BEHIND(-1)/NEAR(0)/MEDIUM(1)/FAR(2) の4値のみ。
+    # (English) A single reference model covers all cut-in variants: near, medium,
+    # (English) far, and parallel-then-accelerate. position takes only the four
+    # (English) values BEHIND(-1)/NEAR(0)/MEDIUM(1)/FAR(2) from logverify.zones.
     model, box_id_of = build_cutin_reference(
         i_range=(-1, 0, 1, 2), side_lanes=(-1, 1), ego_lane=0
     )
 
     results = {}
-    results["近距離cut-in"] = run_case("近距離cut-in", make_cutin_near(), model)
-    results["中距離cut-in"] = run_case("中距離cut-in", make_cutin_medium(), model)
-    results["遠距離cut-in"] = run_case("遠距離cut-in", make_cutin_far(), model)
-    results["並走してから加速するcut-in"] = run_case(
-        "並走してから加速するcut-in", make_cutin_parallel_then_accelerate(), model
+    results["near-distance cut-in"] = run_case("near-distance cut-in", make_cutin_near(), model)
+    results["medium-distance cut-in"] = run_case("medium-distance cut-in", make_cutin_medium(), model)
+    results["far-distance cut-in"] = run_case("far-distance cut-in", make_cutin_far(), model)
+    results["parallel-then-accelerate cut-in"] = run_case(
+        "parallel-then-accelerate cut-in", make_cutin_parallel_then_accelerate(), model
     )
-    results["stays_in_own_lane（負例）"] = run_case(
-        "stays_in_own_lane（負例）", make_stays_in_own_lane(), model
+    results["stays_in_own_lane (negative case)"] = run_case(
+        "stays_in_own_lane (negative case)", make_stays_in_own_lane(), model
     )
-    results["swerve_like（負例）"] = run_case("swerve_like（負例）", make_swerve_like(), model)
+    results["swerve_like (negative case)"] = run_case("swerve_like (negative case)", make_swerve_like(), model)
 
-    print("--- まとめ（同一の参照モデルに対する判定） ---")
+    print("--- Summary (verdicts against the same reference model) ---")
     for name, r in results.items():
         print(f"{name:32s}: {'SAT' if r.is_member else 'UNSAT'}")

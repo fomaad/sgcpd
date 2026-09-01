@@ -36,6 +36,50 @@
      実際に列挙されるシナリオの総数・中身を確認する
      （入力したログの本数と一致すれば「一般化なしで再現された」、
      それより多ければ「入力にない経路も生成された」ことがわかる）。
+
+---
+English:
+Method C: mechanically integrate/abstract multiple logs into a single CPD model.
+
+Difference from the previous methods (all three coexist as separate methods):
+
+  - Method A (existing, vendor/trajectory_abstraction/src/cpd_bridge.py):
+    Uses Sakikawa's 15-region abstraction to build, from a single log, an
+    "instance CPD" that represents only that one log.
+
+  - Method B (logverify/reference_models.py, logverify/zones.py):
+    The designer hand-writes a "scenario set itself" (e.g. cut-in) that does
+    not depend on any specific log, discretizes it on a grid/distance-band
+    basis, and judges whether an arbitrary log fits it (membership check).
+
+  - Method C (this module): mechanically abstracts multiple concrete logs
+    together into a single CPD model. A grid fine enough to distinguish the
+    logs from one another is chosen, and each log's box sequence (a sequence
+    of (lane, position)) is written into the model as "the path that log
+    followed". When multiple logs pass through the same box, the paths
+    merge/branch inside the model at that point, and when scenarios are
+    enumerated from the model (`gcpd.s_gen`), in addition to the paths of
+    all the input logs, "paths that were not in the input" — combinations of
+    their subsequences — can generally also be enumerated (i.e. this is a
+    way of mechanically constructing, from multiple concrete examples, a
+    scenario set that encompasses them).
+
+Key points of usage:
+  1. `find_distinguishing_grid` automatically searches for a grid size
+     (gx, gy) at which all given logs are discretized into mutually
+     different box sequences (starting from a coarse grid and refining it
+     until there are no duplicates).
+  2. `build_union_model` uses that grid size to integrate the box sequences
+     of all logs into a single `gcpd.Model` (a union of the graphs formed by
+     merging the paths of each log).
+  3. `verify_logs_included` confirms, against the integrated model, that
+     each log's box sequence actually becomes SAT under the membership check
+     (i.e. that log is included in the model's scenario set).
+  4. If needed, `count_scenarios` / `enumerate_scenarios` can be used to
+     check the total number/content of the scenarios actually enumerated
+     from the model (if it matches the number of input logs, it was
+     "reproduced without generalization"; if it is greater, "paths not in
+     the input were also generated").
 """
 
 from dataclasses import dataclass, field
@@ -50,6 +94,7 @@ from logverify.membership import MembershipResult, check_membership, reset_solve
 
 BoxKey = Tuple[int, int]  # (lane, position)
 START_BOX = -1  # 実座標を持たないダミーの開始箱（logverify.reference_models と同じ仕掛け）
+# (English) A dummy starting box with no real coordinates (the same device as in logverify.reference_models).
 
 
 def _sequences_from_grid(
@@ -88,6 +133,18 @@ def find_distinguishing_grid(
         max_iters 回試しても区別できなければ、最後に試した（最も細かい）
         格子でのsequencesをそのまま返す（呼び出し側で
         _sequences_distinct により重複の有無を確認できる）。
+
+    ---
+    English:
+    Refine the grid until all logs are discretized into mutually distinct
+    box sequences.
+
+    Returns:
+        (gx, gy, sequences): the grid size that was found, and each log's
+        box sequence on that grid. If the logs cannot be distinguished even
+        after max_iters attempts, the sequences from the last (finest)
+        grid tried are returned as-is (the caller can check for duplicates
+        via _sequences_distinct).
     """
     gx, gy = gx0, gy0
     sequences: List[List[BoxKey]] = []
@@ -105,6 +162,7 @@ class MultiLogModel:
     model: Model
     box_id_of: Dict[BoxKey, int]
     sequences: List[List[BoxKey]]  # 各ログの箱列（(lane, position) のタプル）
+    # (English) each log's box sequence (tuples of (lane, position))
     gx: float
     gy: float
     id_of_box: Dict[int, BoxKey] = field(default_factory=dict)
@@ -118,7 +176,14 @@ def _model_from_sequences(
 ) -> Tuple[Model, Dict[BoxKey, int]]:
     """箱列（(lane, position)の列）の集合から、それらの union をとった
     gcpd.Model を組み立てる（格子の切り方=BoxKeyの作り方には依存しない、
-    共通のモデル構築ロジック）。"""
+    共通のモデル構築ロジック）。
+
+    ---
+    English:
+    From a set of box sequences (sequences of (lane, position)), build a
+    gcpd.Model that is the union of them (this is common model-construction
+    logic that does not depend on how the grid is cut, i.e. how BoxKeys are
+    formed)."""
     box_id_of: Dict[BoxKey, int] = {(None, None): START_BOX}
     boxes: List[Tuple[str, int]] = [(car, START_BOX)]
     position: List[Tuple[str, int, int]] = []
@@ -127,6 +192,7 @@ def _model_from_sequences(
     def get_or_create_box(key: BoxKey) -> int:
         if key not in box_id_of:
             bid = len(boxes) - 1  # boxes[0] は START_BOX なので、新規箱は 0 から連番
+            # (English) boxes[0] is START_BOX, so new boxes are numbered starting from 0
             box_id_of[key] = bid
             boxes.append((car, bid))
             lane_val, pos_val = key
@@ -153,6 +219,7 @@ def _model_from_sequences(
     m.set_ntrans(sorted(ntrans_set))
     m.set_init([(car, START_BOX)])
     m.max_step = max_len  # ダミー開始箱の分だけ +1 されているのでこれでよい
+    # (English) this is fine as-is, since it is already +1 to account for the dummy start box
 
     return m, box_id_of
 
@@ -168,6 +235,13 @@ def build_union_model(
 
     gx/gy を省略した場合（auto_grid=True, デフォルト）は
     find_distinguishing_grid を使って全ログを区別できる格子を自動的に探す。
+
+    ---
+    English:
+    Integrate multiple logs into a single CPD model.
+
+    If gx/gy are omitted (auto_grid=True, the default), find_distinguishing_grid
+    is used to automatically search for a grid that can distinguish all logs.
     """
     if gx is not None and gy is not None:
         sequences = _sequences_from_grid(trajectories, gx, gy)
@@ -243,6 +317,41 @@ def find_distinguishing_near_far_grid(
         各ログの箱列。呼び出し側は `_sequences_distinct(sequences)` で
         最終的に区別できているかを確認できる（build_union_model_near_far_grid
         は内部でこれを検証し、区別できていなければ ValueError を送出する）。
+
+    ---
+    English:
+    Within the range where all logs remain distinguishable, make the far-away
+    cell size (rx_far_cell) as large (coarse) as possible (this is the
+    non-uniform-grid version of find_distinguishing_grid; based on the
+    policy that "far cells should be merged whenever possible", it merges
+    them as aggressively as it can while staying distinguishable).
+
+    rx_near_range, rx_near_cell, and gy are held fixed, and the search
+    proceeds in two stages starting from rx_far_cell0.
+
+    1. If not distinguishable at rx_far_cell0: as before, refine by a
+       factor of shrink at a time until distinguishable. Once rx_far_cell
+       shrinks down to rx_near_cell, the grid becomes equivalent to
+       "quantizing both near and far at rx_near_cell", i.e. equivalent to
+       passing rx_near_cell as a uniform gx to build_union_model, so if the
+       logs can be distinguished on that uniform grid, this is guaranteed
+       to be found in a finite number of steps.
+    2. If distinguishable at rx_far_cell0: there may still be room to make
+       it coarser, so grow it by a factor of grow at a time to search for
+       the "boundary where it stops being distinguishable". Once a boundary
+       is found, binary-search between the distinguishable side and the
+       non-distinguishable side to narrow down to the "largest rx_far_cell
+       that is still distinguishable" with precision tol (meters). If no
+       boundary is found even after max_iters iterations of grow, the
+       coarsest value found so far (the last one that was still
+       distinguishable) is returned as-is.
+
+    Returns:
+        (rx_far_cell, sequences): the far cell size that was found, and
+        each log's box sequence on that grid. The caller can check whether
+        it is ultimately distinguishable via `_sequences_distinct(sequences)`
+        (build_union_model_near_far_grid verifies this internally and
+        raises ValueError if not distinguishable).
     """
 
     def sequences_at(far_cell: float) -> List[List[BoxKey]]:
@@ -251,6 +360,7 @@ def find_distinguishing_near_far_grid(
     sequences0 = sequences_at(rx_far_cell0)
     if not _sequences_distinct(sequences0):
         # 区別できない -> 従来通り、区別できるまで細かくしていく。
+        # (English) Not distinguishable -> as before, refine until distinguishable.
         far_cell = rx_far_cell0
         sequences = sequences0
         for _ in range(max_iters):
@@ -263,6 +373,7 @@ def find_distinguishing_near_far_grid(
         return far_cell, sequences
 
     # rx_far_cell0 で区別できる -> さらに粗くできないか探索する。
+    # (English) Distinguishable at rx_far_cell0 -> search for whether it can be made even coarser.
     best_far_cell, best_sequences = rx_far_cell0, sequences0
     lo, hi = rx_far_cell0, None
     cur = rx_far_cell0
@@ -278,6 +389,8 @@ def find_distinguishing_near_far_grid(
     if hi is not None:
         # lo（区別できる）と hi（区別できない）の間を、区別できる最大値へ
         # 二分探索で絞り込む。
+        # (English) Binary-search between lo (distinguishable) and hi
+        # (not distinguishable) to narrow in on the largest distinguishable value.
         for _ in range(max_iters):
             if hi - lo <= tol:
                 break
@@ -332,6 +445,45 @@ def build_union_model_near_far_grid(
       本関数の内部で検証し、区別できていなければ build_union_model と
       同様に ValueError を送出する（`sequences` の重複を黙って
       見過ごすことはない）。
+
+    ---
+    English:
+    Build an integrated model on a non-uniform grid for the longitudinal
+    distance (rx) from Ego.
+
+    This reflects the idea (section 11.6) that "the part close to Ego should
+    still be distinguished as before, while the far part may be merged".
+
+    - The range |rx| <= rx_near_range is finely distinguished as before,
+      using rx_near_cell (e.g. the same 5.0m default as build_union_model).
+    - The range |rx| > rx_near_range is merged using rx_far_cell (a value
+      larger than rx_near_cell, e.g. 10m or 20m). This reduces the number
+      of far-away boxes and max_step, keeping down the overall model size
+      (effective for the scalability improvement of the Ego-synchronized
+      world-coordinate animation described in section 11.5).
+    - The lane direction (ry) still uses a uniform gy as before (since the
+      number of lanes is already small, the benefit of merging far-away
+      values is small there).
+
+    As with build_union_model, choosing rx_near_range/rx_far_cell poorly
+    risks collapsing different logs into the same box sequence (making them
+    indistinguishable). In fact, when 19 synthesized logs were tried with
+    rx_near_range=25m and rx_far_cell=10m, a case occurred where two logs in
+    the mid-range distance band became indistinguishable (section 11.7). To
+    avoid this risk:
+
+    - When auto_grid=True (the default) and rx_far_cell is omitted,
+      `find_distinguishing_near_far_grid` is used to automatically refine
+      rx_far_cell until all logs are distinguishable (rx_near_range and
+      rx_near_cell respect the caller's values and are not changed). If
+      rx_far_cell is given explicitly, it is used as the initial value for
+      this automatic refinement.
+    - When auto_grid=False, the given rx_far_cell (twice rx_near_cell if
+      omitted) is used as-is.
+    - In either case, this function internally verifies whether all logs
+      are distinguishable on the final grid obtained, and raises ValueError
+      (just like build_union_model) if they are not (duplicates in
+      `sequences` are never silently overlooked).
     """
     if rx_far_cell is None:
         rx_far_cell0 = rx_near_cell * 2
@@ -365,11 +517,19 @@ def build_union_model_near_far_grid(
     # gx はもはや単一の値ではないため、代表値として rx_near_cell を記録しておく
     # （MultiLogModel.gx はログ出力・デバッグ用の参考値であり、モデルの
     # 構築自体には使われない）。
+    # (English) gx is no longer a single value, so rx_near_cell is recorded as a
+    # representative value (MultiLogModel.gx is only a reference value for
+    # logging/debugging and is not used in constructing the model itself).
     return MultiLogModel(model=m, box_id_of=box_id_of, sequences=sequences, gx=rx_near_cell, gy=gy)
 
 
 def verify_logs_included(mlm: MultiLogModel, car: Optional[str] = None) -> List[MembershipResult]:
-    """統合モデルに、元になった各ログの箱列が実際に含まれる(SAT)ことを確認する。"""
+    """統合モデルに、元になった各ログの箱列が実際に含まれる(SAT)ことを確認する。
+
+    ---
+    English:
+    Confirm that the box sequence of each source log is actually included
+    (SAT) in the integrated model."""
     results = []
     for seq in mlm.sequences:
         result = check_membership(mlm.model, seq, car=car, start_offset=1)
@@ -378,7 +538,12 @@ def verify_logs_included(mlm: MultiLogModel, car: Optional[str] = None) -> List[
 
 
 def count_scenarios(mlm: MultiLogModel) -> int:
-    """統合モデルから列挙できるシナリオの総数を返す（入力ログの本数と比較するため）。"""
+    """統合モデルから列挙できるシナリオの総数を返す（入力ログの本数と比較するため）。
+
+    ---
+    English:
+    Return the total number of scenarios that can be enumerated from the
+    integrated model (for comparison against the number of input logs)."""
     reset_solver()
     m = mlm.model
     gcpd.init(m)
@@ -391,10 +556,17 @@ def count_scenarios(mlm: MultiLogModel) -> int:
 
 def enumerate_scenarios(mlm: MultiLogModel) -> List[List[Tuple[int, BoxKey]]]:
     """統合モデルから全シナリオを列挙し、各シナリオを [(step, (lane,position)), ...] の形で返す。
-    （START_BOX に対応するstep 0は除く）"""
+    （START_BOX に対応するstep 0は除く）
+
+    ---
+    English:
+    Enumerate all scenarios from the integrated model and return each
+    scenario in the form [(step, (lane, position)), ...].
+    (step 0, which corresponds to START_BOX, is excluded)"""
     reset_solver()
     m = mlm.model
     m.num_model = 10_000  # enum_ss は num_model 回までしか列挙しないため、十分大きくしておく
+    # (English) enum_ss enumerates only up to num_model times, so keep this large enough
     gcpd.init(m)
     gcpd.add_pos(m)
     gcpd.add_lane(m)
@@ -405,6 +577,7 @@ def enumerate_scenarios(mlm: MultiLogModel) -> List[List[Tuple[int, BoxKey]]]:
     scenarios = []
     for h in history:
         # h は [(car, box, lane, pos, step), ...] のリスト（gcpd.enum_ss の形式）
+        # (English) h is a list of [(car, box, lane, pos, step), ...] (the format produced by gcpd.enum_ss)
         by_step = sorted({(s, l, p) for (c, n, l, p, s) in h if n != START_BOX}, key=lambda x: x[0])
         scenarios.append([(s, (l, p)) for (s, l, p) in by_step])
     return scenarios

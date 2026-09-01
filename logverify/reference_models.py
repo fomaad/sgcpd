@@ -39,6 +39,59 @@ CPDモデルを、格子(grid)の (lane, position) を直接使って書き下�
   side_lanes に複数の値（例: 左右両方）を許すことで、左からのカットイン・
   右からのカットインの両方を1つの参照モデルでカバーする
   （実際にどちらが起きたかは、SATソルバがどちらのinitを選ぶかで決まる）。
+
+---
+English:
+Definition of a grid-based "reference CPD model".
+
+Unlike the existing cpd_bridge.py approach (vendor/trajectory_abstraction/src/cpd_bridge.py),
+which builds an "instance CPD" representing a single log from the output of
+Mr. Sakikawa's abstraction tool, here we write down a CPD model that
+represents "the set of cut-in scenarios itself", independent of any
+particular log, directly using the grid's (lane, position).
+
+Design policy (the general form of cut-in; v0.4 unifies near/medium/far
+distance, side-by-side driving, and acceleration into a single model):
+  1. The NPC starts somewhere in a "side lane" ("side lane", lane !=
+     ego_lane) different from ego's (position may be anywhere within the
+     range of i_range — near, medium, or far distance are all fine)
+     as its initial position.
+  2. While remaining in the side lane, position may change freely
+     (only longitudinal movement, no lane change — this covers
+     approaching, receding, driving side-by-side, and accelerating).
+     Unless `max_position_jump` is specified, there is no upper bound on
+     how much position may change in a single step. This lets behavior
+     such as "drive side-by-side at a constant distance, then accelerate
+     and jump far ahead to merge in" be expressed as just another path
+     within the same model, with a large position jump
+     (driving side-by-side itself naturally appears as a path where
+     several compressed states stay at the same or a nearby position).
+  3. At some step a "merge" happens: moving from the side lane to the
+     ego lane (lane == ego_lane). Position may again change freely
+     (if there is a speed difference at the moment of merging, position
+     can change a lot).
+  4. Once the car has entered the ego lane, it never returns to the side
+     lane again (lane no longer changes; only position can still change).
+
+  This fourth constraint is the core of what distinguishes "cut-in" from
+  "swerving": a trajectory that merges and then returns to (or oscillates
+  back to) the original lane is never accepted by this reference model
+  (i.e. no corresponding transition exists, so the model becomes UNSAT at
+  that point).
+
+  While we made the change in position free, we did not change the lane
+  transition structure (side lane -> ego lane, one direction only). The
+  strength of CPD is that it lets us separate "essential constraints"
+  (the one-directional lane transition) from "degrees of freedom"
+  (position change) within the same model — so a single reference model
+  covers near-distance cut-in, medium-distance cut-in, far-distance
+  cut-in, and cut-in from driving side-by-side, all as separate
+  satisfying solutions (different SAT witnesses).
+
+  Allowing side_lanes to hold multiple values (e.g. both left and right)
+  lets a single reference model cover cut-in from the left and cut-in
+  from the right at once (which one actually occurred is determined by
+  which init the SAT solver picks).
 """
 
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -50,10 +103,12 @@ BoxKey = Tuple[int, int]  # (lane, position)
 
 
 START_BOX = -1  # 「まだどこにも出現していない」ことを表すダミーの初期箱の番号
+# (English) dummy initial box number representing "not yet appeared anywhere"
 
 
 def build_cutin_reference(
     i_range: Sequence[int] = (-1, 0, 1, 2),  # logverify.zones の BEHIND/NEAR/MEDIUM/FAR に対応
+    # (English) corresponds to BEHIND/NEAR/MEDIUM/FAR in logverify.zones
     side_lanes: Sequence[int] = (-1, 1),
     ego_lane: int = 0,
     car: str = "NPC",
@@ -90,6 +145,46 @@ def build_cutin_reference(
     Returns:
         (model, box_id_of): box_id_of は (lane, position) -> box番号 の対応表
         （デバッグ・可視化用。START_BOX はキー (None, None) で登録される）。
+
+    ---
+    English:
+    Build the reference CPD model for cut-in.
+
+    To express the non-determinism of "it's fine to start anywhere in the
+    side lane", we set up a single dummy start box START_BOX that has no
+    real coordinates, and add transitions from it to every candidate
+    initial box in the side lanes.
+    gcpd.py's Box(car,box,step) maintains the model invariant that
+    "exactly one box is active for a given car at any time" by allowing
+    only transitions reachable from a single, unique initial box; if
+    multiple boxes were put directly into inits, they could all remain
+    active simultaneously across every step (making matching against the
+    observation sequence meaningless).
+    For that reason, inits must always be exactly this one dummy box.
+
+    Because of this, the observation sequence passed to
+    membership.check_membership is shifted by one step relative to the
+    model (the model's step 0 corresponds to the dummy box's period, and
+    the actual observations correspond to the model's step 1 onward).
+    So when calling check_membership you must pass start_offset=1
+    (using logverify.membership.check_membership_cutin handles this
+    automatically).
+
+    Args:
+        max_position_jump: the maximum amount position may change in a
+            single transition.
+            None (the default) means unlimited (use this when you want a
+            single model to handle cases with varying amounts of position
+            change together, such as near/medium/far distance, driving
+            side-by-side, and acceleration).
+            Passing an integer imposes an upper bound on the physical
+            distance moved per compressed state — useful when the data is
+            fine-grained and you want to reject large jumps as outliers.
+
+    Returns:
+        (model, box_id_of): box_id_of is a mapping from
+        (lane, position) -> box number (for debugging/visualization;
+        START_BOX is registered under the key (None, None)).
     """
     i_values = list(i_range)
     lanes = list(side_lanes) + [ego_lane]
@@ -126,12 +221,19 @@ def build_cutin_reference(
 
     # 0. ダミー開始箱 -> 隣接レーンの候補となる全ての箱（非決定的な出発点選択:
     #    近距離/中距離/遠距離、どこから始まってもよい）
+    # (English) 0. dummy start box -> every candidate box in the side lanes
+    #    (non-deterministic choice of starting point: near/medium/far
+    #    distance, any of them is fine).
     for lane_val in side_lanes:
         for i in i_values:
             add_edge((None, None), (lane_val, i))
 
     # 1. 隣接レーン内での縦方向移動（車線はまたがない。position の変化量は自由
     #    = 一定距離を保つ「並走」も、大きく詰める「加速」もこの中の経路として表現される）
+    # (English) 1. longitudinal movement within the side lane (no lane
+    #    change; position may change by any amount = both "driving
+    #    side-by-side" at a constant distance and "accelerating" to close
+    #    the gap sharply are expressed as paths within this).
     for lane_val in side_lanes:
         for i1 in i_values:
             for i2 in i_values:
@@ -139,6 +241,8 @@ def build_cutin_reference(
                     add_edge((lane_val, i1), (lane_val, i2))
 
     # 2. 合流（隣接レーン -> egoレーン）。position の変化量は自由。
+    # (English) 2. merge (side lane -> ego lane). Position may change by
+    #    any amount.
     for lane_val in side_lanes:
         for i1 in i_values:
             for i2 in i_values:
@@ -146,6 +250,8 @@ def build_cutin_reference(
                     add_edge((lane_val, i1), (ego_lane, i2))
 
     # 3. 合流後は ego レーン内でのみ縦方向に移動できる（隣接レーンへは戻れない）
+    # (English) 3. after merging, longitudinal movement is only possible
+    #    within the ego lane (cannot return to the side lane).
     for i1 in i_values:
         for i2 in i_values:
             if i1 != i2 and jump_ok(i1, i2):
@@ -155,6 +261,8 @@ def build_cutin_reference(
     m.set_init([(car, START_BOX)])
 
     m.max_step = 0  # membership.check_membership が観測系列の長さに合わせて設定する
+    # (English) set by membership.check_membership to match the length of
+    # the observation sequence
     return m, box_id_of
 
 

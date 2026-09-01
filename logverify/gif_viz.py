@@ -15,6 +15,29 @@ gcpd_gif.VehicleGif は gcpd.enum_ss が返す history（[(car,box,lane,pos,step
      lane/position しか持たず、ego車線自体は登場しない
      （ego基準の相対座標だから）。可視化の見やすさのため、
      lane=0, position=0 に静止した "Ego" を参照点として追加する。
+
+---
+English:
+Uses gcpd_gif.py (the existing GIF animation generator) to visualize scenarios
+enumerated from a CPD model (either Method B or Method C) built in logverify/.
+
+gcpd_gif.VehicleGif takes the history returned by gcpd.enum_ss (a list of lists
+of [(car, box, lane, pos, step), ...]) and produces an animation where cars move
+step by step over a (lane, position) grid (sample2.py is an existing usage
+example).
+
+Two gaps this module fills:
+  1. logverify's models use a dummy start box (START_BOX, box number -1) that
+     has no real coordinates (to represent a non-deterministic start from
+     multiple initial candidates). This box has no position/lane values, so
+     passing it straight to gcpd_gif would break.
+     -> Removed with strip_start_box(), which also collapses the step numbers
+     by one.
+  2. logverify's models only carry lane/position for the NPC (in the
+     multi-log case, a single car named NPC); the ego lane itself never
+     appears (because coordinates are ego-relative). For clarity of
+     visualization, a stationary "Ego" reference point is added at
+     lane=0, position=0.
 """
 
 import os
@@ -31,7 +54,13 @@ HistoryEntry = Tuple[str, int, int, int, int]  # (car, box, lane, position, step
 
 
 def strip_start_box(hs: Sequence[HistoryEntry], start_box: int = -1) -> List[HistoryEntry]:
-    """ダミー開始箱（step 0 にのみ出現する）を取り除き、ステップ番号を1つ詰める。"""
+    """ダミー開始箱（step 0 にのみ出現する）を取り除き、ステップ番号を1つ詰める。
+
+    ---
+    English:
+    Removes the dummy start box (which appears only at step 0) and collapses
+    the step numbers by one.
+    """
     return [(c, n, l, p, s - 1) for (c, n, l, p, s) in hs if n != start_box]
 
 
@@ -58,6 +87,24 @@ def render_scenarios_gif(
 
     Returns:
         生成されたGIFファイルのパスのリスト。
+
+    ---
+    English:
+    Enumerates scenarios from `model` via gcpd.enum_ss and writes them out as
+    GIF animations.
+
+    Args:
+        model: a gcpd.Model, such as one returned by
+            logverify.reference_models.build_cutin_reference or
+            logverify.multi_log_model.build_union_model.
+        output_prefix: prefix for the output file name (the .gif extension is
+            appended automatically).
+        combined: if True, all scenarios are combined into a single GIF
+            (gen_gif_all). If False, a separate file is produced per scenario
+            (gen_gif, generating "{output_prefix}-{index}.gif").
+
+    Returns:
+        A list of paths to the generated GIF files.
     """
     reset_solver()
     gcpd.init(model)
@@ -66,6 +113,7 @@ def render_scenarios_gif(
     gcpd.add_init(model)
     gcpd.add_trans(model)
     model.num_model = 10_000  # enum_ss が打ち切らないよう十分大きくする
+    # (English) Large enough that enum_ss does not truncate the enumeration.
     history = gcpd.enum_ss(model)
 
     stripped = [strip_start_box(hs, start_box) for hs in history]
@@ -84,6 +132,13 @@ def render_scenarios_gif(
     # （同じステップの全車両分のタプルがまとまって並んでいる）ことを前提に
     # しているため、単純に末尾へ追記するのではなく、ステップごとにEgoの
     # エントリを挟み込む。
+    #
+    # (English)
+    # Add Ego as a reference point fixed at lane=0, position=0 to every step.
+    # gcpd_gif.make_scenario assumes entries are grouped in step order (all
+    # cars' tuples for the same step appear together), so instead of simply
+    # appending Ego's entries at the end, we interleave an Ego entry into each
+    # step.
     with_ego = []
     for hs in stripped:
         by_step: dict = {}
@@ -96,6 +151,7 @@ def render_scenarios_gif(
         with_ego.append(combined_hs)
 
     # gcpd_gif は非負の格子座標を前提にしているため、lane/positionをシフトする
+    # (English) gcpd_gif assumes non-negative grid coordinates, so shift lane/position.
     shifted = [
         [(c, n, l - lane_min, p - pos_min, s) for (c, n, l, p, s) in hs] for hs in with_ego
     ]

@@ -19,6 +19,35 @@ JSON読み込みを含む）には一切依存していない（logverify全体�
 部分は、必要になった時点で本モジュールの中に独立に実装する
 （`grid_states_from_relative_xy` はすでに相対座標が分かっている場合の
 入口。JSON読み込み自体はまだ用意していない）。
+
+---
+English:
+Grid-based abstraction adapter.
+
+Takes Autoware/AJISAI logs (or the time-series coordinates of any
+ego/NPC) expressed as ego-centered, heading-relative coordinates
+(rx, ry), discretizes them onto a grid with the given cell size
+(gx, gy), and produces an integer sequence that maps directly onto
+the CPD's (position=i, lane=k).
+
+Unlike Sakikawa's named-area abstraction
+(vendor/trajectory_abstraction/src/abstraction_15area.py, etc.), this
+module reuses the exact granularity that was used when writing the
+reference CPD. That is, gx/gy are parameters that let the CPD model's
+designer choose, on their own, "the width of one lane" and "the
+longitudinal distance corresponding to one box".
+
+This module has no dependency whatsoever on the code under Sakikawa's
+vendor/trajectory_abstraction (including coordinate normalization and
+JSON loading) — as a matter of policy for logverify as a whole, Method
+B and Method C are implemented independently, without using the
+vendor's code. Only Method A (vendor/trajectory_abstraction/src/cpd_bridge.py)
+uses the vendor. The part that extracts ego-relative coordinates
+(rx, ry) from real data (AJISAI log JSON) will be implemented
+independently inside this module once it is actually needed
+(`grid_states_from_relative_xy` is the entry point for when the
+relative coordinates are already known; JSON loading itself has not
+been implemented yet).
 """
 
 from dataclasses import dataclass
@@ -29,12 +58,18 @@ import numpy as np
 
 @dataclass
 class GridState:
-    """圧縮後の1状態（イベント駆動: 連続して同じ格子セルに留まる区間を1つにまとめたもの）"""
-    index: int          # 0始まりの状態番号（CPDのbox番号にそのまま使う）
-    i: int               # 縦方向グリッド index（position）
-    k: int               # 横方向グリッド index（lane）
-    start_frame: int      # この状態に対応する元データの開始フレーム
-    end_frame: int         # この状態に対応する元データの終了フレーム（inclusive）
+    """圧縮後の1状態（イベント駆動: 連続して同じ格子セルに留まる区間を1つにまとめたもの）
+
+    ---
+    English:
+    One state after compression (event-driven: a run of consecutive
+    frames that stay in the same grid cell is collapsed into one).
+    """
+    index: int          # 0始まりの状態番号（CPDのbox番号にそのまま使う） (English) 0-based state number (used directly as the CPD box number)
+    i: int               # 縦方向グリッド index（position） (English) longitudinal grid index (position)
+    k: int               # 横方向グリッド index（lane） (English) lateral grid index (lane)
+    start_frame: int      # この状態に対応する元データの開始フレーム (English) start frame of the source data for this state
+    end_frame: int         # この状態に対応する元データの終了フレーム（inclusive） (English) end frame of the source data for this state (inclusive)
 
 
 def grid_index_centered(value: float, cell_size: float) -> int:
@@ -43,6 +78,16 @@ def grid_index_centered(value: float, cell_size: float) -> int:
     floor() ベースだと k=0 のセルが [0, gy) のように非対称になり、
     「lane=0 は自車線」という直感（自車線中心 ry=0 の前後 ±gy/2）とずれる。
     ここでは round() を使い、k=0 が [-gy/2, +gy/2) になるようにする。
+
+    ---
+    English:
+    Returns a grid index that is symmetric around 0 (rounds to the
+    nearest integer, not round-half-to-even).
+
+    With a floor()-based scheme, the k=0 cell would be asymmetric,
+    e.g. [0, gy), which conflicts with the intuition that "lane=0 is
+    the ego lane" (centered on ry=0, ±gy/2 on each side). Here round()
+    is used instead, so that k=0 becomes [-gy/2, +gy/2).
     """
     return int(np.floor(value / cell_size + 0.5))
 
@@ -70,6 +115,28 @@ def grid_index_variable(value: float, near_cell: float, far_cell: float, near_ra
     value・near_cell・far_cell・near_range の単位は呼び出し側で揃えること
     （例: メートル）。返り値は value について単調非減少（symmetricなので
     絶対値が大きいほど原点から離れたインデックスになる）。
+
+    ---
+    English:
+    A non-uniform grid index whose resolution varies with distance
+    from Ego.
+
+    Implements the idea that "the region near Ego should keep being
+    distinguished finely, as before, while the far region may be
+    lumped together" (addressing the issue raised in section 11.6).
+
+    - For |value| <= near_range, the same grid_index_centered as
+      before is used with near_cell (the ability to distinguish
+      positions near Ego is unchanged).
+    - For |value| > near_range, additional index steps are added on
+      top of the boundary index at near_range, using far_cell (a
+      value larger than near_cell is expected). The larger far_cell
+      is, the more far-away cells get merged into the same index.
+
+    The caller must keep value, near_cell, far_cell, and near_range in
+    consistent units (e.g. meters). The return value is monotonically
+    non-decreasing in value (since it is symmetric, a larger absolute
+    value means an index further from the origin).
     """
     if abs(value) <= near_range:
         return grid_index_centered(value, near_cell)
@@ -90,7 +157,16 @@ def to_grid_indices_variable(
     """to_grid_indices の非一様版。rx（縦方向=Egoからの距離）だけを
     grid_index_variable で量子化し、ry（横方向=レーン）は従来通り
     一様な grid_index_centered を使う（レーン数はもともと少なく、
-    遠方でまとめる恩恵が小さいため）。"""
+    遠方でまとめる恩恵が小さいため）。
+
+    ---
+    English:
+    Non-uniform version of to_grid_indices. Only rx (longitudinal =
+    distance from Ego) is quantized with grid_index_variable; ry
+    (lateral = lane) still uses the uniform grid_index_centered as
+    before (the number of lanes is already small, so there is little
+    benefit to merging far-away lanes).
+    """
     if rx is None or ry is None or np.isnan(rx) or np.isnan(ry):
         return None, None
     return (
@@ -109,6 +185,16 @@ def compress_to_grid_states(
 
     「連続して同じ (i, k) に留まっている区間」を1つの状態にまとめる。
     これは docs/log_to_cpd_verification_design.md 4.3節「イベント駆動（第一選択）」の実装。
+
+    ---
+    English:
+    Discretizes the (rx, ry) time series onto the grid and compresses
+    it event-driven-style.
+
+    A run of consecutive frames that stay in the same (i, k) is
+    collapsed into a single state. This implements section 4.3,
+    "Event-driven (first choice)", of
+    docs/log_to_cpd_verification_design.md.
     """
     states: List[GridState] = []
     prev_ik: Optional[Tuple[int, int]] = None
@@ -134,7 +220,13 @@ def compress_to_grid_states_variable(
     rx_near_range: float,
     gy: float,
 ) -> List[GridState]:
-    """compress_to_grid_states の非一様版（rxにgrid_index_variableを使う）。"""
+    """compress_to_grid_states の非一様版（rxにgrid_index_variableを使う）。
+
+    ---
+    English:
+    Non-uniform version of compress_to_grid_states (uses
+    grid_index_variable for rx).
+    """
     states: List[GridState] = []
     prev_ik: Optional[Tuple[int, int]] = None
 
@@ -158,6 +250,15 @@ def grid_states_from_relative_xy(
 
     実データが手元にない場合の合成トラジェクトリでのテストや、
     座標正規化を別途済ませている場合に使う。
+
+    ---
+    English:
+    A simple entry point for when the ego-relative coordinates
+    (rx, ry) are already known.
+
+    Used for testing with synthetic trajectories when real data is
+    not on hand, or when coordinate normalization has already been
+    done separately.
     """
     rxs = [p[0] for p in rel_xy]
     rys = [p[1] for p in rel_xy]

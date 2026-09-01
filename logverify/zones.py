@@ -14,6 +14,27 @@ logverify.grid_bridge の生の格子インデックス（例: i_range=-2..20）
 直接この順序値に丸め込む。箱の数は距離レンジによらず一定になり、
 「近距離cut-in」「中距離cut-in」「遠距離cut-in」といった質問にも
 直接対応する。
+
+---
+English:
+A module that classifies longitudinal distance into a small number of
+ordinal scale values such as "near / medium / far".
+
+As described in docs/log_to_cpd_verification_design.md section 2.1, a
+CPD's position is not a continuous coordinate but a discrete ordinal
+value given by the model designer.
+If we directly use logverify.grid_bridge's raw grid index (e.g.
+i_range=-2..20) as the boxes of the reference CPD, the number of boxes
+grows in proportion to the distance range, and building all transitions
+explodes on the order of (number of boxes)^2, so the solver would no
+longer finish in a practical amount of time.
+
+So instead, the reference CPD side keeps position as just a small set
+of ordinal values — "near (0) / medium (1) / far (2)" (+ behind (-1)) —
+and rounds the longitudinal distance (rx) directly into these ordinal
+values. The number of boxes then stays constant regardless of the
+distance range, and this directly supports questions like "near-distance
+cut-in", "medium-distance cut-in", and "far-distance cut-in".
 """
 
 from dataclasses import dataclass
@@ -23,6 +44,8 @@ from logverify.grid_bridge import grid_index_centered
 
 
 # 順序値 -> ラベル。実際の position の整数値としてそのままCPDに使う。
+# (English) ordinal value -> label. Used directly in CPD as the actual
+# integer value of position.
 BEHIND = -1
 NEAR = 0
 MEDIUM = 1
@@ -33,10 +56,19 @@ ZONE_LABELS = {BEHIND: "後方", NEAR: "近距離", MEDIUM: "中距離", FAR: "�
 
 @dataclass
 class ZoneThresholds:
-    """縦方向距離 rx (m, 前方が正) を順序値に丸めるためのしきい値。"""
+    """縦方向距離 rx (m, 前方が正) を順序値に丸めるためのしきい値。
+
+    ---
+    English:
+    Thresholds for rounding longitudinal distance rx (m, positive is
+    ahead) into an ordinal value.
+    """
     near_max: float = 5.0     # |rx| <= near_max を「近距離」（後方はbehindが優先）
+    # (English) |rx| <= near_max is "near" (behind takes priority when behind)
     medium_max: float = 20.0  # near_max < rx <= medium_max を「中距離」
+    # (English) near_max < rx <= medium_max is "medium"
     # rx > medium_max は「遠距離」、rx < -near_max は「後方」
+    # (English) rx > medium_max is "far"; rx < -near_max is "behind"
 
 
 def classify_rx(rx: float, th: ZoneThresholds = ZoneThresholds()) -> int:
@@ -53,7 +85,9 @@ def classify_rx(rx: float, th: ZoneThresholds = ZoneThresholds()) -> int:
 class ZoneState:
     index: int
     lane: int    # 横方向の格子インデックス（laneとしてそのまま使う）
+    # (English) lateral grid index (used directly as lane)
     zone: int    # 縦方向の順序値（positionとしてそのまま使う）
+    # (English) longitudinal ordinal value (used directly as position)
     start_frame: int
     end_frame: int
 
@@ -65,7 +99,13 @@ def compress_to_zone_states(
     thresholds: ZoneThresholds = ZoneThresholds(),
 ) -> List[ZoneState]:
     """(rx, ry) の時系列を (lane=格子, position=距離帯) に丸め、
-    イベント駆動で圧縮する。"""
+    イベント駆動で圧縮する。
+
+    ---
+    English:
+    Round a time series of (rx, ry) into (lane=grid, position=distance
+    band), and compress it in an event-driven manner.
+    """
     states: List[ZoneState] = []
     prev_key: Optional[Tuple[int, int]] = None
 

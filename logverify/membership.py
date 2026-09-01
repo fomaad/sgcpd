@@ -17,6 +17,29 @@ check_membership の実装:
 
 gcpd.py はモジュールレベルの可変状態 (solver, c2i) を持つため、
 複数回 check_membership を呼ぶ際は明示的にリセットする。
+
+---
+English:
+Determines whether a discretized log conforms (membership) to a reference CPD model.
+
+Implementation of check_membership as described in docs/log_to_cpd_verification_design.md
+sections 5.1 and 9.3:
+
+  The observed sequence of (lane, position) pairs (steps 0..T) is fed into the
+  solver as an "additional constraint" on top of the reference model's own
+  Box/Pos/Lane constraints (add_pos, add_lane, add_init, add_trans). Specifically,
+  for each step t we add a disjunctive constraint stating "one of the boxes with
+  that (lane, position) is active."
+
+  - SAT   -> the log's behavior can be explained, without contradiction, as an
+             element of the scenario set defined by the reference model
+             (it conforms).
+  - UNSAT -> a transition not permitted by the reference model has occurred
+             (e.g. merging once and then returning to a different lane,
+             a meandering movement, etc.).
+
+Because gcpd.py holds module-level mutable state (solver, c2i), it must be
+explicitly reset whenever check_membership is called more than once.
 """
 
 from dataclasses import dataclass
@@ -33,6 +56,7 @@ class MembershipResult:
     max_step: int
     num_steps_observed: int
     unmatched_step: Optional[int] = None  # 参照モデルに対応する箱が1つも無かった最初のステップ
+    # (English) The first step for which no matching box existed in the reference model.
 
     def __str__(self) -> str:
         if self.unmatched_step is not None:
@@ -50,6 +74,14 @@ def reset_solver() -> None:
 
     gcpd.py は `solver = Solver()` をモジュールロード時に一度だけ作る設計になっており、
     複数のモデルを別々に検証しようとすると制約が蓄積してしまう。
+
+    ---
+    English:
+    Resets the gcpd module's global solver/c2i.
+
+    gcpd.py is designed to create `solver = Solver()` only once, at module load
+    time, so trying to verify multiple models separately would otherwise cause
+    constraints to accumulate.
     """
     gcpd.solver = gcpd.Solver()
     gcpd.c2i = {}
@@ -78,6 +110,21 @@ def check_membership(
     例えば reference_models.build_cutin_reference のようにモデルの
     step 0 が「実座標を持たないダミーの開始箱」に対応する場合は
     start_offset=1 を指定する（観測 t 番目は モデルの step t+1 に対応する）。
+
+    ---
+    English:
+    observed_lane_position: an ordered sequence [(lane_0, position_0),
+    (lane_1, position_1), ...].
+
+    When building this directly from a compressed grid-state sequence
+    (a list of logverify.grid_bridge.GridState), pass
+        [(s.k, s.i) for s in states]
+
+    start_offset: the offset indicating which step of the model the head of
+    the observed sequence corresponds to. For example, when the model's
+    step 0 corresponds to a "dummy start box with no real coordinates," as in
+    reference_models.build_cutin_reference, specify start_offset=1 (observed
+    index t corresponds to the model's step t+1).
     """
     reset_solver()
 
@@ -120,5 +167,11 @@ def check_membership_cutin(
     car: Optional[str] = None,
 ) -> MembershipResult:
     """reference_models.build_cutin_reference が作るモデル専用のショートカット。
-    ダミー開始箱の分のオフセット (start_offset=1) を自動で付与する。"""
+    ダミー開始箱の分のオフセット (start_offset=1) を自動で付与する。
+
+    ---
+    English:
+    A shortcut specific to models built by reference_models.build_cutin_reference.
+    Automatically applies the offset for the dummy start box (start_offset=1).
+    """
     return check_membership(model, observed_lane_position, car=car, start_offset=1)

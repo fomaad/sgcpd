@@ -4,6 +4,14 @@ Egoを実際にCPDの car として組み込んだモデル構造図（11.5節�
 
 実行方法:
     cd sgcpd && python3 -m logverify.demo_model_diagram_with_ego
+
+---
+English:
+Demo that draws a model structure diagram with Ego actually incorporated as a
+CPD car (with_ego_track from Section 11.5).
+
+How to run:
+    cd sgcpd && python3 -m logverify.demo_model_diagram_with_ego
 """
 
 import os
@@ -25,15 +33,17 @@ if __name__ == "__main__":
     os.makedirs(OUT_DIR, exist_ok=True)
 
     # 方法B: cut-in参照CPD + Ego
+    # (English) Method B: cut-in reference CPD + Ego
     model_b, box_id_of_b = build_cutin_reference(i_range=(-1, 0, 1))
     path_b = plot_model_with_ego_paper_style(
         model_b, box_id_of_b, os.path.join(OUT_DIR, "model_cutin_with_ego.png"),
         car="NPC", ego_lane=0, ego_max_step=4,
         title="Cut-in reference CPD + Ego (synchronized) - Method B",
     )
-    print("方法B:", path_b)
+    print("Method B:", path_b)
 
     # 方法C: 4ログ統合モデル + Ego
+    # (English) Method C: unified model from 4 logs + Ego
     logs = {
         "cutin_right_near": log_cutin_right_near(),
         "cutin_left_medium": log_cutin_left_medium(),
@@ -46,4 +56,4 @@ if __name__ == "__main__":
         car="NPC", ego_lane=0, ego_max_step=mlm.model.max_step,
         title="Unified CPD from 4 logs + Ego (synchronized) - Method C",
     )
-    print("方法C:", path_c)
+    print("Method C:", path_c)

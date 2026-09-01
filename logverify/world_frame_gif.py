@@ -48,6 +48,66 @@ Egoとまったく同じ格子セルに描画されてしまう。これは「NP
 positionが実際の格子（メートル単位）であるモデルでは、0は本当に
 「ほぼ同じ位置」を意味しうるため、デフォルト（0＝オフセットなし）の
 ままにしておくこと。
+
+---
+English:
+Animates the scenarios enumerated from logverify's CPD model in the
+"world coordinate frame" (absolute coordinate system).
+
+## Background (v1 -> v2)
+
+In v1, gif_viz.py treated the (lane, position) held by the model as a
+grid of "coordinates relative to Ego" and drew it that way, while the
+fact that "Ego moves forward" was expressed only as an after-the-fact
+computation on the animation side (ego_world_position = step *
+ego_speed). However, this was merely a visualization trick, since the
+CPD model itself has no car called Ego. As the user pointed out, "in
+the original English paper, CPD itself must be modeling Ego's forward
+motion", and indeed in the paper (Fig.2/Fig.7) the CPD models Ego as
+just another car like the others, with its own sequence of boxes.
+
+In v2, logverify.ego_car.with_ego_track is used to build a model in
+which Ego is actually added to the CPD as a car, so that the scenarios
+enumerated by gcpd.enum_ss themselves include Ego's box sequence.
+Ego's forward motion is tied to the NPC's transitions via a
+synchronized transition (strans) (see the docstring of ego_car.py for
+details), so that "whenever the NPC actually changes its distance
+zone/lane, Ego always advances by one" and "when the NPC does not
+change, Ego does not change either" — this is solved as part of the
+scenario that the CPD represents.
+
+Since the NPC-side position (in both Method B and Method C) directly
+represents the relative distance to Ego, when drawing it as a single
+fixed-camera picture it is converted into on-screen coordinates as:
+    NPC absolute position = Ego(box).position (= the number of
+                             synchronized advances so far)
+                             + NPC relative position
+(this conversion itself is purely for the visuals and does not change
+the meaning of the scenario set the CPD represents, i.e. it remains
+relative-distance based).
+
+## Note: adding Method B's distance zone (an ordinal scale) directly as a coordinate can look like a collision
+
+The position in Method B (`reference_models.build_cutin_reference`) is
+an **ordinal-scale distance-zone category** defined by
+`logverify/zones.py` as BEHIND=-1 / NEAR=0 / MEDIUM=1 / FAR=2, not an
+actual metric distance (Section 10.5). If NEAR=0 is substituted as-is
+into the formula "Ego's forward amount + relative position", it amounts
+to adding exactly 0 to Ego's world coordinate, so it gets drawn in
+exactly the same grid cell as Ego. This is a visual artifact caused by
+the abstract classification "the NPC is extremely close to Ego (NEAR)"
+happening to be represented by the number 0 — it does not mean the
+model represents "a colliding scenario" (collision-possibility
+determination itself is a separate matter combined with `ps_col` in
+Section 9.4, and has not yet been incorporated into the reference CPD
+in this section — future work, Section 11.5).
+
+To avoid this, the `zone_ahead_offset` argument was added so that "a
+uniform offset can be added only to distance zones of 0 or greater
+(NEAR/MEDIUM/FAR)" (BEHIND is excluded because it is already
+distinguishable as being in front of Ego). For a model like Method C
+where position is an actual grid (in meters), 0 can genuinely mean
+"almost the same position", so leave it at the default (0 = no offset).
 """
 
 import os
@@ -66,7 +126,13 @@ HistoryEntry = Tuple[str, int, int, int, int]  # (car, box, lane, position, step
 
 def strip_pre_scenario_step(hs: Sequence[HistoryEntry]) -> List[HistoryEntry]:
     """ステップ0（NPCがダミー開始箱にいる助走区間であり、Egoにとっても
-    まだ本番前の初期位置に相当する）を丸ごと取り除き、ステップ番号を1つ詰める。"""
+    まだ本番前の初期位置に相当する）を丸ごと取り除き、ステップ番号を1つ詰める。
+
+    ---
+    English:
+    Removes step 0 entirely (the run-up interval during which the NPC is
+    in the dummy starting box, which also corresponds to Ego's initial
+    pre-scenario position), and shifts the step numbers down by one."""
     return [(c, n, l, p, s - 1) for (c, n, l, p, s) in hs if s != 0]
 
 
@@ -119,6 +185,56 @@ def render_world_frame_gif(
 
     Returns:
         生成されたGIFファイルのパスのリスト。
+
+    ---
+    English:
+    Adds Ego to model as a car, enumerates scenarios with gcpd.enum_ss,
+    and writes them out as a GIF animation in the world coordinate frame
+    in which Ego advances.
+
+    Args:
+        model: A gcpd.Model as returned by
+            logverify.reference_models.build_cutin_reference or
+            logverify.multi_log_model.build_union_model (a model that
+            holds the NPC as a car, without Ego). This argument itself
+            is not modified (with_ego_track builds a new model).
+        output_prefix: Prefix for the output file name (the .gif
+            extension is added automatically).
+        ego_lane: The lane value assigned to Ego (a fixed lane for
+            drawing purposes; default 0).
+        ego_speed: The scale used to convert Ego's box number (= the
+            number of synchronized advances made together with the NPC's
+            transitions) into a number of on-screen grid cells (default
+            1 = one synchronized advance = one cell).
+        combined: If True, all scenarios are combined into a single GIF
+            (gen_gif_all). If False, a separate file is produced per
+            scenario.
+        max_step: The upper bound on the length of Ego's box sequence,
+            and on the length of the scenarios enumerated for the whole
+            model. Models from logverify.reference_models are built with
+            max_step=0 left as-is (on the assumption that it will be set
+            to match the length of the observed sequence at membership-
+            check time), so it must be given explicitly when
+            visualizing. If None, model.max_step is used as-is (the
+            Method C union model is normally already set automatically
+            from the log length, so it can usually be omitted).
+        num_model: The upper bound on the number of scenarios enumerated
+            (passed to gcpd.enum_ss). For a model with a lot of
+            non-determinism, such as Method B's reference CPD, full
+            enumeration can become very large, so it is a good idea to
+            restrict this to a small value (e.g. 6) for visualization.
+        zone_ahead_offset: A uniform offset added to the NPC's relative
+            position when it is 0 or greater (i.e. not on the side
+            behind Ego). Adding Method B's distance zone (e.g. NEAR=0)
+            directly to Ego's absolute coordinate causes NEAR to be
+            drawn in exactly the same grid cell as Ego, making it look
+            like a collision (see the note at the top of this file). It
+            is a good idea to specify 1 or more when drawing Method B.
+            For Method C (where position is an actual grid, i.e. in
+            meters), leave it at the default of 0.
+
+    Returns:
+        A list of paths to the generated GIF files.
     """
     aug_model = with_ego_track(model, max_step=max_step, ego_lane=ego_lane, ego_car=ego_car)
     aug_model.num_model = num_model
@@ -140,6 +256,9 @@ def render_world_frame_gif(
 
     # シナリオごとに、ステップ -> {car: (lane, position)} の対応を作る
     # （Ego, NPC 双方の実際に solve された箱がここに入る）
+    # (English) For each scenario, build a mapping from step -> {car:
+    # (lane, position)} (this holds the actually-solved boxes for both
+    # Ego and the NPC).
     scenarios_by_step: List[Dict[int, Dict[str, Tuple[int, int]]]] = []
     for hs in stripped:
         by_step: Dict[int, Dict[str, Tuple[int, int]]] = {}
@@ -159,6 +278,24 @@ def render_world_frame_gif(
     # 横に合流する、という一般的な運転動作にも近い）。これはCPDが検証
     # した状態そのものは変えず、あくまで描画上の補間経路を分割するだけ
     # である点に注意。
+    #
+    # (English) The NPC's position is a distance relative to Ego, so when
+    # converting to world coordinates for the fixed-camera drawing, we add
+    # Ego's own amount of forward advance (Ego(box).position, the value
+    # actually held in the CPD's solution).
+    #
+    # If a transition that involves a lane change is interpolated as a
+    # straight line directly from (old lane, old position) to (new lane,
+    # new position), the diagonal path can graze Ego's position and make
+    # it look like a collision (per the user's observation; see Section
+    # 11.5). To avoid this, for transitions where the lane changes we
+    # insert a two-stage set of intermediate frames: "first move only the
+    # vertical position while staying in the current lane, then switch
+    # only the lane" (this is also close to how an ordinary driving
+    # maneuver actually performs a lane change: close the gap
+    # longitudinally, then merge laterally). Note that this does not
+    # change the state actually verified by the CPD itself — it only
+    # splits the interpolated path used for drawing.
     world_scenarios: List[List[HistoryEntry]] = []
     for by_step in scenarios_by_step:
         max_s = max(by_step.keys())
@@ -192,6 +329,9 @@ def render_world_frame_gif(
 
     # 全シナリオを通した lane/position の範囲を求め、グリッドサイズを共通化する
     # (gen_gif_all は1本のGIF内でグリッドサイズを変えられないため)
+    # (English) Find the range of lane/position across all scenarios and
+    # unify the grid size (because gen_gif_all cannot change the grid
+    # size within a single GIF).
     all_lanes = [l for hs in world_scenarios for (c, n, l, p, s) in hs]
     all_positions = [p for hs in world_scenarios for (c, n, l, p, s) in hs]
     lane_min, lane_max = min(all_lanes), max(all_lanes)
@@ -212,6 +352,13 @@ def render_world_frame_gif(
     # 隣接レーンの車同士がセルの境界をまたいで実際にはレーンが違うのに
     # 矩形が視覚的に重なってしまう（衝突しているように誤解される原因の
     # 1つだった。11.5節参照）。
+    # (English) Shrink car_width/car_height (default 100/50 respectively)
+    # so that, even together with the margin, they do not exceed
+    # grid_scale (the width of one cell). Failing to do this causes the
+    # rectangles of cars in adjacent lanes to visually overlap across the
+    # cell boundary even though they are actually in different lanes
+    # (this was one cause of scenarios being mistaken for collisions; see
+    # Section 11.5).
     vg.car_width = min(60, grid_scale - 20)
     vg.car_height = min(40, grid_scale - 20)
 
@@ -224,6 +371,11 @@ def render_world_frame_gif(
     # x/y margin はセル内でEgoとNPCの矩形をずらして見やすくするためのもの。
     # margin + car_width/car_height が grid_scale を超えないようにする
     # （超えると上記と同じ理由で隣接レーンの車と誤って重なって見える）。
+    # (English) x/y margin are used to offset the Ego and NPC rectangles
+    # within a cell so they are easier to see. Make sure margin +
+    # car_width/car_height does not exceed grid_scale (exceeding it
+    # causes cars in adjacent lanes to appear to incorrectly overlap, for
+    # the same reason as above).
     vg.x_margin = {ego_car: 10, **{c: grid_scale - vg.car_width - 10 for c in model.cars}}
     vg.y_margin = {ego_car: 10, **{c: grid_scale - vg.car_height - 10 for c in model.cars}}
 
