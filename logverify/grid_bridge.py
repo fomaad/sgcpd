@@ -263,3 +263,131 @@ def grid_states_from_relative_xy(
     rxs = [p[0] for p in rel_xy]
     rys = [p[1] for p in rel_xy]
     return compress_to_grid_states(rxs, rys, gx, gy)
+
+
+def relative_xy_from_ajisai_groundtruth(
+    json_path: str, npc_name: Optional[str] = None
+) -> List[Tuple[float, float]]:
+    """実際のAJISAIログ（JAMA-Traceable ADS Runtime Log Dataset）のJSONファイルから、
+    ego基準の相対座標 (rx, ry) の時系列を取り出す。
+
+    AJISAIのログ形式では、`groundtruth_kinematic` が
+    `[{"timestamp": ..., "groundtruth_ego": {...}, "groundtruth_vehicles": [...]}, ...]`
+    という、egoと全NPCの位置(x, y, z)・姿勢(rotation)がタイムスタンプごとに
+    同期して記録された配列になっている（world座標系、単位は概ねメートル）。
+
+    ここでは、各タイムスタンプについて
+      1. egoの姿勢の `rotation.z`（度、water-levelのyaw角）から、
+         ワールド座標系でのegoの前方単位ベクトル・左方単位ベクトルを求める
+         （実データで検証済み: 連続する2フレームのego位置の変位ベクトルの
+         向きと `rotation.z` が一致することを確認した — すなわち
+         rotation.z は標準的な数学の角度（+x軸から反時計回りに測った角度、度）
+         としてそのまま使ってよい）。
+      2. 指定したNPC（`npc_name`。Noneの場合は、そのフレームに存在する唯一の
+         NPCを自動選択する。複数いる場合はエラー）の位置とegoの位置の差分
+         （ワールド座標系）を、上記の前方・左方ベクトルに射影することで
+         rx（前方距離）・ry（左方向のオフセット。正が左隣接レーン側、
+         負が右隣接レーン側 — logverify全体で使っているry符号の規約と一致）
+         を求める。
+    NPCがそのフレームに存在しない（未検出・視野外など）タイムスタンプは
+    スキップする（欠測として扱う。補間はしない）。
+
+    Args:
+        json_path: AJISAIログのJSONファイルへのパス。
+        npc_name: 相対座標を計算する対象のNPC名（例: "npc1"）。
+            Noneの場合、各フレームで観測される名前の集合から一意に決まれば
+            それを使う。複数のNPC名が観測される場合はValueErrorを送出する
+            （その場合は npc_name を明示的に指定すること）。
+
+    Returns:
+        [(rx, ry), ...] のリスト（`grid_states_from_relative_xy` や
+        `zones.zone_states_from_relative_xy` にそのまま渡せる）。
+
+    ---
+    English:
+    Extract a time series of ego-relative coordinates (rx, ry) from an
+    actual AJISAI log (JAMA-Traceable ADS Runtime Log Dataset) JSON file.
+
+    In the AJISAI log format, `groundtruth_kinematic` is an array of
+    `[{"timestamp": ..., "groundtruth_ego": {...}, "groundtruth_vehicles": [...]}, ...]`,
+    where the position (x, y, z) and orientation (rotation) of ego and every
+    NPC are recorded together, synchronized per timestamp (world coordinate
+    frame, units roughly in meters).
+
+    For each timestamp, this function:
+      1. Computes ego's forward and left unit vectors in the world frame
+         from ego's `rotation.z` (degrees, yaw angle) (verified against the
+         real data: the direction of the displacement vector between two
+         consecutive ego positions matches `rotation.z`, confirming that
+         rotation.z can be used directly as a standard mathematical angle —
+         degrees measured counterclockwise from the +x axis).
+      2. Projects the world-frame difference between the specified NPC's
+         (`npc_name`; if None, the single NPC observed in that frame is
+         auto-selected, and an error is raised if more than one NPC name is
+         observed) position and ego's position onto the forward/left
+         vectors above, to obtain rx (forward distance) and ry (leftward
+         offset — positive is the left-adjacent-lane side, negative is the
+         right-adjacent-lane side, matching the ry sign convention used
+         throughout logverify).
+    Timestamps where the NPC is not present in that frame (not detected,
+    out of view, etc.) are skipped (treated as missing data; no
+    interpolation is performed).
+
+    Args:
+        json_path: path to the AJISAI log JSON file.
+        npc_name: the name of the NPC to compute relative coordinates for
+            (e.g. "npc1"). If None, the name observed across frames is used
+            if it is unique; a ValueError is raised if more than one NPC
+            name is observed (in that case, pass npc_name explicitly).
+
+    Returns:
+        A list of [(rx, ry), ...] (can be passed directly to
+        `grid_states_from_relative_xy` or
+        `zones.zone_states_from_relative_xy`).
+    """
+    import json
+    import math
+
+    with open(json_path) as f:
+        data = json.load(f)
+
+    gk = data["groundtruth_kinematic"]
+
+    if npc_name is None:
+        observed_names = set()
+        for rec in gk:
+            for v in rec.get("groundtruth_vehicles", []):
+                observed_names.add(v["name"])
+        if len(observed_names) != 1:
+            raise ValueError(
+                f"npc_name を指定してください（複数のNPC名が観測されました: {sorted(observed_names)}） "
+                f"/ (English) please specify npc_name explicitly (multiple NPC names observed: "
+                f"{sorted(observed_names)})"
+            )
+        npc_name = next(iter(observed_names))
+
+    rel_xy: List[Tuple[float, float]] = []
+    for rec in gk:
+        ego = rec.get("groundtruth_ego")
+        if ego is None:
+            continue
+        ex = ego["pose"]["position"]["x"]
+        ey = ego["pose"]["position"]["y"]
+        yaw = math.radians(ego["pose"]["rotation"]["z"])
+        fwd_x, fwd_y = math.cos(yaw), math.sin(yaw)
+        left_x, left_y = -math.sin(yaw), math.cos(yaw)
+
+        npc = next(
+            (v for v in rec.get("groundtruth_vehicles", []) if v["name"] == npc_name), None
+        )
+        if npc is None:
+            continue
+        nx = npc["pose"]["position"]["x"]
+        ny = npc["pose"]["position"]["y"]
+        dx, dy = nx - ex, ny - ey
+
+        rx = dx * fwd_x + dy * fwd_y
+        ry = dx * left_x + dy * left_y
+        rel_xy.append((rx, ry))
+
+    return rel_xy
