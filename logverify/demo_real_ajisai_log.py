@@ -32,7 +32,10 @@ from logverify.reference_models import build_cutin_reference
 from logverify.membership import check_membership_cutin
 from logverify.report import summarize_trace, describe_scenario
 from logverify.multi_log_model import build_union_model, verify_logs_included, count_scenarios
+from logverify.gif_viz import render_scenarios_gif
+from logverify.model_diagram import plot_model_with_ego_paper_style
 
+OUT_DIR = "out_gif"
 GY = 3.5
 THRESHOLDS = ZoneThresholds(near_max=5.0, medium_max=20.0)
 
@@ -89,6 +92,36 @@ def run(json_path: str, npc_name=None) -> None:
             "to the data's noise' issue discussed in design doc section 11.2, item 2 -- and it "
             "shows up even with a single log, once real (non-synthetic) data is used."
         )
+    print()
+
+    # --- Visualization: one enumerated scenario as a static-Ego GIF, plus the
+    # model structure diagram. The model built from this one real log has
+    # max_step=33, which is far larger than what we've verified the
+    # Ego-synchronized (strans-based) world-frame animation can handle in a
+    # practical amount of time (see design doc section 11.6/11.7 -- it timed
+    # out even at num_model=1 on a model this size), so here we use the
+    # simpler static-Ego renderer (gif_viz.render_scenarios_gif) instead, with
+    # num_model=1 so it only solves for a single scenario rather than all of
+    # them. The model structure diagram is pure drawing (no solving), so it
+    # does not have this limitation and can safely include Ego. ---
+    print("=== Visualization ===")
+    t4 = time.time()
+    gif_paths = render_scenarios_gif(
+        mlm.model, f"{OUT_DIR}/real_ajisai_cutin", combined=True, num_model=1
+    )
+    t5 = time.time()
+    print(f"Static-Ego GIF (1 scenario): {gif_paths} ({t5 - t4:.2f}s)")
+
+    diagram_path = plot_model_with_ego_paper_style(
+        mlm.model,
+        mlm.box_id_of,
+        f"{OUT_DIR}/model_real_ajisai_with_ego.png",
+        car="NPC",
+        ego_lane=0,
+        ego_max_step=mlm.model.max_step,
+        title="Real AJISAI cut-in log (1) - Method C union model + Ego",
+    )
+    print(f"Model structure diagram: {diagram_path}")
     print()
 
 

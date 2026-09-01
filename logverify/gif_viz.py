@@ -74,6 +74,7 @@ def render_scenarios_gif(
     combined: bool = True,
     grid_scale: int = 120,
     a_res: int = 8,
+    num_model: int = 10_000,
 ) -> List[str]:
     """model から gcpd.enum_ss でシナリオを列挙し、GIFアニメーションとして書き出す。
 
@@ -112,8 +113,11 @@ def render_scenarios_gif(
     gcpd.add_lane(model)
     gcpd.add_init(model)
     gcpd.add_trans(model)
-    model.num_model = 10_000  # enum_ss が打ち切らないよう十分大きくする
-    # (English) Large enough that enum_ss does not truncate the enumeration.
+    model.num_model = num_model  # デフォルトはenum_ssが打ち切らないよう十分大きい値。
+    # 大規模モデルで可視化に必要な分だけに絞りたい場合は小さい値を指定する。
+    # (English) The default is large enough that enum_ss does not truncate
+    # the enumeration. Pass a smaller value to limit enumeration to only
+    # what is needed for visualization on a large model.
     history = gcpd.enum_ss(model)
 
     stripped = [strip_start_box(hs, start_box) for hs in history]
