@@ -274,6 +274,213 @@ def describe(model: Model, box_id_of: Dict[BoxKey, int]) -> str:
     return "\n".join(lines)
 
 
+def build_cutin_reference_9area(
+    side_lanes: Sequence[int] = (-1, 1),
+    ego_lane: int = 0,
+    car: str = "NPC",
+) -> Tuple[Model, Dict[BoxKey, int]]:
+    """咲川氏の9領域（lane×position、ego車両自身の物理サイズだけで
+    決まる境界）を箱の語彙として使う、ほぼ完全に自由な参照CPDモデル。
+
+    【設計変更の経緯】以前のバージョンは、合流遷移（隣接レーン→ego
+    レーン）だけを咲川氏の抽象空間ルール（合流元はFOLLOWでない、
+    合流先は必ずLEAD）で制約し、かつ「一度ego車線に入ったら隣接
+    レーンへは戻れない」という制約（rule 3）を持っていた。
+    しかしユーザーからの指摘の通り、rule 3は「カットインの前後の
+    挙動を自由にしたい（合流後にさらに別レーンへ車線変更する場合も
+    含めて）」という要求と両立しない。かといって、rule 3を外し、
+    合流遷移の制約だけを残すと、こういう問題が起きる:
+    「一度も隣接レーンからego車線へ移らない（ずっとego車線に留まる）
+    ログ」も、この制約付きグラフの中では当然SATになる。
+    つまり、遷移をほぼ自由にした時点で、SAT/UNSATという判定自体は
+    もはや「カットインが起きたか」の情報を持たなくなる
+    （SATであることは何も保証しない）。
+
+    したがって、この関数はもはや「カットイン判定」を担わない。
+    ここが提供するのは、咲川氏の9領域という語彙の上での、ほぼ完全に
+    自由な遷移グラフ（一般的な構造モデル）だけである。
+    「カットインが起きたかどうか」自体は、この関数が作るSATモデルに
+    埋め込むのではなく、logverify.sakikawa_relations.detect_cutin
+    （観測された圧縮列に対する直接の局所的パターン照合、咲川氏の
+    abstract_cutin_detected と同じ問いを、SATを介さずに判定する）で
+    別途判定する。この分離によって初めて、
+      - カットインの判定基準は咲川氏の健全なルールそのまま維持しつつ、
+      - それ以外の挙動（カットイン前、カットイン後のさらなる
+        車線変更を含む）は完全に自由に許す
+    という、両立しなかった2つの要求を両立できる。
+
+    ---
+    English:
+    An almost fully free reference CPD model that uses Mr. Sakikawa's
+    9-area partition (lane x position, with boundaries set solely by the
+    ego vehicle's own physical size) as its vocabulary of boxes.
+
+    Background on this design change: an earlier version of this function
+    constrained only the merge transition (side lane -> ego lane) using
+    Mr. Sakikawa's abstract-space rule (merge source must not be FOLLOW,
+    merge target must always be LEAD), and additionally had a rule 3:
+    "once in the ego lane, you can never return to a side lane." As the
+    user pointed out, rule 3 is incompatible with wanting the behavior
+    before and after the cut-in to be free (including a further lane
+    change after merging). But simply dropping rule 3 while keeping the
+    merge-transition constraint creates a different problem: a log that
+    never once moves from a side lane into the ego lane (stays in the ego
+    lane throughout) would trivially be SAT against that constrained-but-
+    otherwise-free graph too. In other words, once transitions are made
+    almost fully free, the SAT/UNSAT verdict itself no longer carries any
+    information about whether a cut-in occurred (being SAT guarantees
+    nothing).
+
+    So this function no longer performs cut-in detection at all. What it
+    provides is only an almost fully free transition graph over Mr.
+    Sakikawa's 9-area vocabulary (a generic structural model). "Whether a
+    cut-in occurred" is instead determined separately by
+    logverify.sakikawa_relations.detect_cutin (a direct, local pattern
+    check against the observed compressed sequence, asking the same
+    question as the vendor tool's abstract_cutin_detected, without going
+    through SAT). Only by separating the two can both of the previously
+    incompatible requirements be satisfied at once:
+      - the cut-in criterion itself stays exactly Mr. Sakikawa's sound
+        rule, while
+      - everything else (before the cut-in, and any further lane changes
+        after it) is left completely free.
+    """
+    from logverify.sakikawa_relations import FOLLOW, OVERLAP, LEAD
+
+    positions = [FOLLOW, OVERLAP, LEAD]
+    lanes = list(side_lanes) + [ego_lane]
+
+    m = Model()
+    m.set_car([car])
+
+    boxes: List[Tuple[str, int]] = [(car, START_BOX)]
+    position: List[Tuple[str, int, int]] = []
+    lane: List[Tuple[str, int, int]] = []
+    box_id_of: Dict[BoxKey, int] = {(None, None): START_BOX}
+
+    bid = 0
+    for lane_val in lanes:
+        for p in positions:
+            box_id_of[(lane_val, p)] = bid
+            boxes.append((car, bid))
+            position.append((car, bid, p))
+            lane.append((car, bid, lane_val))
+            bid += 1
+
+    m.set_box(boxes)
+    m.set_position(position)
+    m.set_lane(lane)
+
+    ntrans: List[Tuple[str, int, str, int]] = []
+
+    def add_edge(from_key: BoxKey, to_key: BoxKey) -> None:
+        if from_key in box_id_of and to_key in box_id_of and from_key != to_key:
+            ntrans.append((car, box_id_of[from_key], car, box_id_of[to_key]))
+
+    # 0. ダミー開始箱 -> 全ての候補箱（側方レーン・egoレーンを問わない）
+    # (English) 0. dummy start box -> every candidate box (side lanes or
+    #    the ego lane, without restriction)
+    for lane_val in lanes:
+        for p in positions:
+            add_edge((None, None), (lane_val, p))
+
+    # 1. 箱と箱の間はほぼ完全に自由（lane・positionのどちらも自由に変化しうる、
+    #    車線変更・車線内移動を区別しない）。これにより、カットイン前・後
+    #    （さらなる車線変更を含む）の挙動を一切制限しない、9領域という
+    #    語彙だけを持つ一般的な構造モデルになる。
+    # (English) 1. transitions between boxes are almost completely free
+    #    (both lane and position may change freely; no distinction between
+    #    a lane change and movement within a lane). This makes the model a
+    #    generic structural model that carries only the 9-area vocabulary,
+    #    without restricting behavior before or after a cut-in (including
+    #    further lane changes).
+    for lane1 in lanes:
+        for p1 in positions:
+            for lane2 in lanes:
+                for p2 in positions:
+                    add_edge((lane1, p1), (lane2, p2))
+
+    m.set_ntrans(ntrans)
+    m.set_init([(car, START_BOX)])
+
+    m.max_step = 0  # membership.check_membership が観測系列の長さに合わせて設定する
+    return m, box_id_of
+
+
+def build_cutin_reference_9area_scenario(
+    side_lanes: Sequence[int] = (-1, 1),
+    ego_lane: int = 0,
+    car: str = "NPC",
+) -> "Sakikawa9AreaReferenceScenario":
+    """build_cutin_reference_9area（ほぼ自由な構造モデル）を、対応する
+    抽象化ルール（logverify.sakikawa_relations、ego車両自身のサイズの
+    み）、および咲川氏のカットイン演算子（logverify.sakikawa_relations.
+    detect_cutin）と1つに束ねる。
+
+    .check() は2つの異なる問いに別々に答える:
+      - membership: 観測列が9領域という語彙（ほぼ自由な遷移グラフ）の
+        中で説明できるか（＝箱の語彙の範囲内に収まっているか、という
+        弱いチェック。カットインの有無は保証しない）。
+      - cutin_events: 咲川氏のルールに従うカットイン遷移が列のどこかに
+        存在するか（＝この関数が実際に問いたい「カットインが起きたか」
+        の答え）。
+
+    ---
+    English:
+    Bundles build_cutin_reference_9area (the almost-fully-free structural
+    model) together with its corresponding abstraction rule
+    (logverify.sakikawa_relations, the ego vehicle's own size only) and Mr.
+    Sakikawa's cut-in operator (logverify.sakikawa_relations.detect_cutin).
+
+    .check() answers two different questions separately:
+      - membership: can the observed sequence be explained within the
+        9-area vocabulary (the almost-free transition graph)? (a weak
+        check -- only that it stays within the box vocabulary; it says
+        nothing about whether a cut-in occurred).
+      - cutin_events: does a cut-in transition, per Mr. Sakikawa's rule,
+        occur anywhere in the sequence? (this is the actual answer to
+        "did a cut-in happen").
+    """
+    from logverify.sakikawa_relations import detect_cutin, relation_states_from_relative_xy
+
+    model, box_id_of = build_cutin_reference_9area(side_lanes=side_lanes, ego_lane=ego_lane, car=car)
+
+    class Sakikawa9AreaReferenceScenario:
+        def __init__(self, model, box_id_of, side_lanes, ego_lane, car):
+            self.model = model
+            self.box_id_of = box_id_of
+            self.side_lanes = tuple(side_lanes)
+            self.ego_lane = ego_lane
+            self.car = car
+
+        def abstract(self, rel_xy):
+            return relation_states_from_relative_xy(rel_xy)
+
+        def check(self, rel_xy):
+            from logverify.membership import check_membership_cutin
+
+            states = self.abstract(rel_xy)
+            observed = [(s.lane, s.position) for s in states]
+            result = check_membership_cutin(self.model, observed, car=self.car)
+            return states, result
+
+        def detect_cutin(self, rel_xy):
+            """咲川氏のカットイン演算子を、観測列に直接（SATを介さずに）
+            適用する。「カットインが起きたか」を実際に判定するのはこちら。
+
+            ---
+            English:
+            Applies Mr. Sakikawa's cut-in operator directly to the observed
+            sequence (without going through SAT). This is what actually
+            determines whether a cut-in occurred.
+            """
+            states = self.abstract(rel_xy)
+            events = detect_cutin(states, side_lanes=self.side_lanes, ego_lane=self.ego_lane)
+            return states, events
+
+    return Sakikawa9AreaReferenceScenario(model, box_id_of, side_lanes, ego_lane, car)
+
+
 @dataclass
 class CutinReferenceScenario:
     """参照CPDモデルと、それに対応するログの抽象化ルールを1つにまとめたもの。
