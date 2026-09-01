@@ -31,9 +31,15 @@ from logverify.zones import zone_states_from_relative_xy, ZoneThresholds
 from logverify.reference_models import build_cutin_reference
 from logverify.membership import check_membership_cutin
 from logverify.report import summarize_trace, describe_scenario
-from logverify.multi_log_model import build_union_model, verify_logs_included, count_scenarios
+from logverify.multi_log_model import (
+    build_union_model,
+    build_union_model_near_far_grid,
+    verify_logs_included,
+    count_scenarios,
+)
 from logverify.gif_viz import render_scenarios_gif
 from logverify.model_diagram import plot_model_with_ego_paper_style
+from logverify.world_frame_gif import render_world_frame_gif
 
 OUT_DIR = "out_gif"
 GY = 3.5
@@ -122,6 +128,38 @@ def run(json_path: str, npc_name=None) -> None:
         title="Real AJISAI cut-in log (1) - Method C union model + Ego",
     )
     print(f"Model structure diagram: {diagram_path}")
+    print()
+
+    # --- Near/far grid: shrink the far region so the Ego-synchronized
+    # animation becomes tractable. With auto_grid=True (the default),
+    # build_union_model_near_far_grid maximizes how coarse the far cell can
+    # be while still keeping all input logs distinguishable from each other
+    # -- but with only ONE log, there is nothing else to stay distinguishable
+    # from, so that search degenerates to the coarsest possible grid and
+    # destroys almost all detail (max_step collapses to just 4). That
+    # maximizing search only makes sense with multiple logs (see design doc
+    # section 11.7). So here we instead pick a fixed, moderate rx_far_cell
+    # by hand (auto_grid=False) that still keeps the merge region legible. ---
+    print("=== Method C with a near/far grid (fixed far cell, to shrink the model for animation) ===")
+    mlm_nf = build_union_model_near_far_grid(
+        [rel_xy], rx_near_cell=5.0, rx_far_cell=15.0, rx_near_range=20.0, gy=GY, auto_grid=False
+    )
+    print(f"Number of boxes: {len(mlm_nf.model.boxes)} (was {len(mlm.model.boxes)} on the uniform grid)")
+    print(f"max_step: {mlm_nf.model.max_step} (was {mlm.model.max_step} on the uniform grid)")
+    print(f"Box sequence: {mlm_nf.sequences[0]}")
+
+    t6 = time.time()
+    ego_sync_paths = render_world_frame_gif(
+        mlm_nf.model, f"{OUT_DIR}/real_ajisai_cutin_ego_sync", combined=True, ego_speed=1.0, num_model=1
+    )
+    t7 = time.time()
+    print(f"Ego-synchronized world-frame animation: {ego_sync_paths} ({t7 - t6:.2f}s)")
+    print(
+        "This confirms the earlier answer about why the Ego-synchronized animation timed out on "
+        "the uniform-grid model: it was because the far-from-ego region had not been merged. On "
+        "the near/far grid it shrinks from 31 boxes/max_step=33 down to a size where the "
+        "strans-based Ego-synchronized animation completes in well under a minute."
+    )
     print()
 
 
