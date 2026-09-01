@@ -55,6 +55,50 @@ def to_grid_indices(
     return grid_index_centered(rx, gx), grid_index_centered(ry, gy)
 
 
+def grid_index_variable(value: float, near_cell: float, far_cell: float, near_range: float) -> int:
+    """Egoからの距離に応じて分解能を変える、非一様な格子インデックス。
+
+    「Egoに近い部分は今まで通り細かく区別し、遠い部分はまとめてしまってよい」
+    という考え方（11.6節の課題への対応）を実装したもの。
+
+    - |value| <= near_range の範囲は、near_cell を使ったこれまで通りの
+      grid_index_centered をそのまま使う（Ego近傍の区別能力は変えない）。
+    - |value| > near_range の部分は、near_range の境界インデックスを基準に、
+      far_cell（near_cell より大きい値を渡す想定）で追加のインデックスを足す。
+      far_cell が大きいほど、遠方の複数のセルが同じインデックスにまとめられる。
+
+    value・near_cell・far_cell・near_range の単位は呼び出し側で揃えること
+    （例: メートル）。返り値は value について単調非減少（symmetricなので
+    絶対値が大きいほど原点から離れたインデックスになる）。
+    """
+    if abs(value) <= near_range:
+        return grid_index_centered(value, near_cell)
+    sign = 1 if value > 0 else -1
+    boundary_idx = grid_index_centered(sign * near_range, near_cell)
+    remainder = value - sign * near_range
+    return boundary_idx + sign * grid_index_centered(abs(remainder), far_cell)
+
+
+def to_grid_indices_variable(
+    rx: Optional[float],
+    ry: Optional[float],
+    rx_near_cell: float,
+    rx_far_cell: float,
+    rx_near_range: float,
+    gy: float,
+) -> Tuple[Optional[int], Optional[int]]:
+    """to_grid_indices の非一様版。rx（縦方向=Egoからの距離）だけを
+    grid_index_variable で量子化し、ry（横方向=レーン）は従来通り
+    一様な grid_index_centered を使う（レーン数はもともと少なく、
+    遠方でまとめる恩恵が小さいため）。"""
+    if rx is None or ry is None or np.isnan(rx) or np.isnan(ry):
+        return None, None
+    return (
+        grid_index_variable(rx, rx_near_cell, rx_far_cell, rx_near_range),
+        grid_index_centered(ry, gy),
+    )
+
+
 def compress_to_grid_states(
     rxs: Sequence[Optional[float]],
     rys: Sequence[Optional[float]],
@@ -71,6 +115,31 @@ def compress_to_grid_states(
 
     for frame, (rx, ry) in enumerate(zip(rxs, rys)):
         i, k = to_grid_indices(rx, ry, gx, gy)
+        if i is None:
+            continue
+        if prev_ik is not None and (i, k) == prev_ik:
+            states[-1].end_frame = frame
+            continue
+        states.append(GridState(index=len(states), i=i, k=k, start_frame=frame, end_frame=frame))
+        prev_ik = (i, k)
+
+    return states
+
+
+def compress_to_grid_states_variable(
+    rxs: Sequence[Optional[float]],
+    rys: Sequence[Optional[float]],
+    rx_near_cell: float,
+    rx_far_cell: float,
+    rx_near_range: float,
+    gy: float,
+) -> List[GridState]:
+    """compress_to_grid_states の非一様版（rxにgrid_index_variableを使う）。"""
+    states: List[GridState] = []
+    prev_ik: Optional[Tuple[int, int]] = None
+
+    for frame, (rx, ry) in enumerate(zip(rxs, rys)):
+        i, k = to_grid_indices_variable(rx, ry, rx_near_cell, rx_far_cell, rx_near_range, gy)
         if i is None:
             continue
         if prev_ik is not None and (i, k) == prev_ik:

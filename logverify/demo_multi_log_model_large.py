@@ -22,14 +22,20 @@ demo_multi_log_model.py の4本はどれも rx（縦方向の距離）の範囲�
     cd sgcpd && python3 -m logverify.demo_multi_log_model_large
 """
 
+import os
 import time
 
 from logverify.multi_log_model import (
     build_union_model,
+    build_union_model_near_far_grid,
     verify_logs_included,
     count_scenarios,
     enumerate_scenarios,
 )
+from logverify.model_diagram import plot_model_with_ego_paper_style
+from logverify.world_frame_gif import render_world_frame_gif
+
+OUT_DIR = "out_gif"
 
 
 def _cutin(start_rx, rx_step, side_ry, length=6, merge_at=3):
@@ -159,3 +165,57 @@ if __name__ == "__main__":
             f"入力ログの部分列が別の経路と合流し、入力にはなかった新しい経路も "
             f"{n_scenarios - len(logs)}本 生成された（一般化が起きた）"
         )
+    print()
+
+    # --- Egoに近い距離帯は今まで通り(5m)、遠い距離帯はまとめる(10m)、
+    # 非一様な格子での統合モデル（11.6節：格子設計の見直し） ---
+    print("=== Egoに近い部分は細かく、遠い部分はまとめる非一様格子での統合 ===")
+    t6 = time.time()
+    mlm_nf = build_union_model_near_far_grid(
+        list(logs.values()), rx_near_cell=5.0, rx_far_cell=10.0, rx_near_range=45.0, gy=3.5
+    )
+    t7 = time.time()
+    print(f"統合モデル構築にかかった時間: {t7 - t6:.2f}秒")
+    print(f"箱の数: {len(mlm_nf.model.boxes)}  (一様格子では{len(mlm.model.boxes)}だった)")
+    print(f"max_step: {mlm_nf.model.max_step}  (一様格子では{mlm.model.max_step}だった)")
+
+    t8 = time.time()
+    results_nf = verify_logs_included(mlm_nf)
+    t9 = time.time()
+    n_ok_nf = sum(r.is_member for r in results_nf)
+    print(f"membership check: {n_ok_nf}/{len(logs)} 本SAT ({t9 - t8:.2f}秒)")
+
+    t10 = time.time()
+    n_scenarios_nf = count_scenarios(mlm_nf)
+    t11 = time.time()
+    print(f"シナリオ列挙数: {n_scenarios_nf} (一様格子では{n_scenarios}だった, {t11 - t10:.2f}秒)")
+    print()
+
+    # --- Egoを同期遷移(strans)で実際にCPDのcarとして追加したワールド座標系
+    # アニメーション。列挙する必要があるのは「絵にする分の数個」だけでよく、
+    # num_modelを小さく絞ることで、この規模のモデルでも実用的な時間で描画できる
+    # （11.6節：全列挙ではなくmembership checkだけならそもそも列挙不要、という
+    # 指摘を受けての見直し。アニメーションは可視化目的で数個あれば十分）。---
+    print("=== Egoを同期させたワールド座標系アニメーション（数個だけ列挙） ===")
+    os.makedirs(OUT_DIR, exist_ok=True)
+    t12 = time.time()
+    paths = render_world_frame_gif(
+        mlm_nf.model,
+        os.path.join(OUT_DIR, "multilog_large_with_ego"),
+        combined=True,
+        ego_speed=1.0,
+        num_model=5,
+    )
+    t13 = time.time()
+    print(f"Ego同期版アニメーション（num_model=5）: {t13 - t12:.2f}秒 -> {paths}")
+
+    path_diagram = plot_model_with_ego_paper_style(
+        mlm_nf.model,
+        mlm_nf.box_id_of,
+        os.path.join(OUT_DIR, "model_multilog_large_near_far_with_ego.png"),
+        car="NPC",
+        ego_lane=0,
+        ego_max_step=mlm_nf.model.max_step,
+        title="Unified CPD from 19 logs (near/far grid) + Ego (synchronized) - Method C",
+    )
+    print("モデル構造図:", path_diagram)

@@ -44,7 +44,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import gcpd
 from gcpd import Model
 
-from logverify.grid_bridge import compress_to_grid_states
+from logverify.grid_bridge import compress_to_grid_states, compress_to_grid_states_variable
 from logverify.membership import MembershipResult, check_membership, reset_solver
 
 
@@ -113,34 +113,12 @@ class MultiLogModel:
         self.id_of_box = {v: k for k, v in self.box_id_of.items()}
 
 
-def build_union_model(
-    trajectories: Sequence[Sequence[Tuple[float, float]]],
-    gx: Optional[float] = None,
-    gy: Optional[float] = None,
-    car: str = "NPC",
-    auto_grid: bool = True,
-) -> MultiLogModel:
-    """複数ログを1つのCPDモデルに統合する。
-
-    gx/gy を省略した場合（auto_grid=True, デフォルト）は
-    find_distinguishing_grid を使って全ログを区別できる格子を自動的に探す。
-    """
-    if gx is not None and gy is not None:
-        sequences = _sequences_from_grid(trajectories, gx, gy)
-    else:
-        gx0 = gx if gx is not None else 5.0
-        gy0 = gy if gy is not None else 3.5
-        if auto_grid:
-            gx, gy, sequences = find_distinguishing_grid(trajectories, gx0, gy0)
-            if not _sequences_distinct(sequences):
-                raise ValueError(
-                    f"格子を (gx={gx}, gy={gy}) まで細かくしても全ログを区別できませんでした。"
-                    "max_iters を増やすか、gx0/gy0 を小さくしてやり直してください。"
-                )
-        else:
-            gx, gy = gx0, gy0
-            sequences = _sequences_from_grid(trajectories, gx, gy)
-
+def _model_from_sequences(
+    sequences: Sequence[Sequence[BoxKey]], car: str
+) -> Tuple[Model, Dict[BoxKey, int]]:
+    """箱列（(lane, position)の列）の集合から、それらの union をとった
+    gcpd.Model を組み立てる（格子の切り方=BoxKeyの作り方には依存しない、
+    共通のモデル構築ロジック）。"""
     box_id_of: Dict[BoxKey, int] = {(None, None): START_BOX}
     boxes: List[Tuple[str, int]] = [(car, START_BOX)]
     position: List[Tuple[str, int, int]] = []
@@ -176,7 +154,86 @@ def build_union_model(
     m.set_init([(car, START_BOX)])
     m.max_step = max_len  # ダミー開始箱の分だけ +1 されているのでこれでよい
 
+    return m, box_id_of
+
+
+def build_union_model(
+    trajectories: Sequence[Sequence[Tuple[float, float]]],
+    gx: Optional[float] = None,
+    gy: Optional[float] = None,
+    car: str = "NPC",
+    auto_grid: bool = True,
+) -> MultiLogModel:
+    """複数ログを1つのCPDモデルに統合する。
+
+    gx/gy を省略した場合（auto_grid=True, デフォルト）は
+    find_distinguishing_grid を使って全ログを区別できる格子を自動的に探す。
+    """
+    if gx is not None and gy is not None:
+        sequences = _sequences_from_grid(trajectories, gx, gy)
+    else:
+        gx0 = gx if gx is not None else 5.0
+        gy0 = gy if gy is not None else 3.5
+        if auto_grid:
+            gx, gy, sequences = find_distinguishing_grid(trajectories, gx0, gy0)
+            if not _sequences_distinct(sequences):
+                raise ValueError(
+                    f"格子を (gx={gx}, gy={gy}) まで細かくしても全ログを区別できませんでした。"
+                    "max_iters を増やすか、gx0/gy0 を小さくしてやり直してください。"
+                )
+        else:
+            gx, gy = gx0, gy0
+            sequences = _sequences_from_grid(trajectories, gx, gy)
+
+    m, box_id_of = _model_from_sequences(sequences, car)
     return MultiLogModel(model=m, box_id_of=box_id_of, sequences=sequences, gx=gx, gy=gy)
+
+
+def build_union_model_near_far_grid(
+    trajectories: Sequence[Sequence[Tuple[float, float]]],
+    rx_near_cell: float,
+    rx_far_cell: float,
+    rx_near_range: float,
+    gy: float = 3.5,
+    car: str = "NPC",
+) -> MultiLogModel:
+    """Egoからの縦方向距離(rx)について、非一様な格子で統合モデルを作る。
+
+    「Egoに近い部分は今まで通り区別し、遠い部分はまとめてよい」という
+    考え方（11.6節）を反映したもの。build_union_model のように格子を
+    自動細分化はせず、near/far のセルサイズと、どこまでを「近い」と
+    するかの境界(rx_near_range)を呼び出し側が指定する。
+
+    - |rx| <= rx_near_range の範囲は rx_near_cell（例: build_union_model の
+      デフォルトと同じ 5.0m など）で従来通り細かく区別する。
+    - |rx| > rx_near_range の範囲は rx_far_cell（rx_near_cell より大きい
+      値、例: 20mや30m）でまとめる。これにより遠方の箱数・
+      max_step が減り、モデル全体のサイズを抑えられる
+      （Egoを同期させたワールド座標系アニメーション（11.5節）の
+      スケーラビリティ改善に有効）。
+    - レーン方向(ry)は従来通り一様な gy を使う（レーン数はもともと
+      少なく、遠方でまとめる恩恵が小さいため）。
+
+    自動細分化は行わないため、rx_near_cell/rx_far_cell/rx_near_range/gy
+    の組み合わせによっては、異なるログが同じ箱列に潰れてしまう
+    （区別できなくなる）可能性がある。呼び出し側で
+    `MultiLogModel.sequences` の重複有無（本モジュールの
+    `_sequences_distinct` 相当）を確認すること。
+    """
+    sequences: List[List[BoxKey]] = []
+    for traj in trajectories:
+        rxs = [p[0] for p in traj]
+        rys = [p[1] for p in traj]
+        states = compress_to_grid_states_variable(
+            rxs, rys, rx_near_cell, rx_far_cell, rx_near_range, gy
+        )
+        sequences.append([(s.k, s.i) for s in states])
+
+    m, box_id_of = _model_from_sequences(sequences, car)
+    # gx はもはや単一の値ではないため、代表値として rx_near_cell を記録しておく
+    # （MultiLogModel.gx はログ出力・デバッグ用の参考値であり、モデルの
+    # 構築自体には使われない）。
+    return MultiLogModel(model=m, box_id_of=box_id_of, sequences=sequences, gx=rx_near_cell, gy=gy)
 
 
 def verify_logs_included(mlm: MultiLogModel, car: Optional[str] = None) -> List[MembershipResult]:
