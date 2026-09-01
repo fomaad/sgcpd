@@ -149,21 +149,45 @@ def render_world_frame_gif(
 
     # NPCのpositionはEgoとの相対距離なので、Ego自身の前進量（実際にCPDが
     # 解として持つEgo(box).position）を足し込んでワールド座標に変換する。
+    #
+    # 車線変更を伴う遷移は、そのまま(旧レーン,旧position)から(新レーン,新
+    # position)へ直線で補間すると、斜めに突っ切る経路がEgoの位置をかすめ、
+    # 衝突しているように見えてしまうことがある（ユーザ指摘、11.5節参照）。
+    # これを避けるため、車線が変わる遷移では「まず現在のレーンのまま
+    # 縦位置(position)だけ動き、その後にレーンだけを切り替える」という
+    # 2段階の中間フレームを挿入する（実際の車線変更＝縦に詰めてから
+    # 横に合流する、という一般的な運転動作にも近い）。これはCPDが検証
+    # した状態そのものは変えず、あくまで描画上の補間経路を分割するだけ
+    # である点に注意。
     world_scenarios: List[List[HistoryEntry]] = []
     for by_step in scenarios_by_step:
         max_s = max(by_step.keys())
         combined_hs: List[HistoryEntry] = []
+        step_idx = 0
+        prev_npc_lane: Optional[int] = None
         for s in range(max_s + 1):
             entries = by_step.get(s, {})
             _, ego_pos_v = entries.get(ego_car, (ego_lane, 0))
             ego_world_pos = ego_pos_v * ego_speed
+
             if npc_car in entries:
                 npc_lane_v, npc_pos_rel = entries[npc_car]
                 if npc_pos_rel >= 0:
                     npc_pos_rel = npc_pos_rel + zone_ahead_offset
                 npc_world_pos = ego_world_pos + npc_pos_rel
-                combined_hs.append((npc_car, 0, npc_lane_v, round(npc_world_pos), s))
-            combined_hs.append((ego_car, 0, ego_lane, round(ego_world_pos), s))
+
+                if prev_npc_lane is not None and prev_npc_lane != npc_lane_v:
+                    # 中間フレーム: 旧レーンのまま新positionへ
+                    combined_hs.append(
+                        (npc_car, 0, prev_npc_lane, round(npc_world_pos), step_idx)
+                    )
+                    combined_hs.append((ego_car, 0, ego_lane, round(ego_world_pos), step_idx))
+                    step_idx += 1
+
+                combined_hs.append((npc_car, 0, npc_lane_v, round(npc_world_pos), step_idx))
+                prev_npc_lane = npc_lane_v
+            combined_hs.append((ego_car, 0, ego_lane, round(ego_world_pos), step_idx))
+            step_idx += 1
         world_scenarios.append(combined_hs)
 
     # 全シナリオを通した lane/position の範囲を求め、グリッドサイズを共通化する
@@ -183,6 +207,13 @@ def render_world_frame_gif(
     vg.grid_x = (lane_max - lane_min) + 1
     vg.grid_y = (pos_max - pos_min) + 1
     vg.y_bup = 0
+    # car_width/car_height（デフォルトはそれぞれ100/50）を、marginと合わせても
+    # grid_scale（=1セルの幅）を超えないよう縮小する。これを怠ると、
+    # 隣接レーンの車同士がセルの境界をまたいで実際にはレーンが違うのに
+    # 矩形が視覚的に重なってしまう（衝突しているように誤解される原因の
+    # 1つだった。11.5節参照）。
+    vg.car_width = min(60, grid_scale - 20)
+    vg.car_height = min(40, grid_scale - 20)
 
     colors = dict(npc_colors or {})
     default_palette = [(220, 30, 30), (30, 160, 60), (200, 140, 0), (140, 60, 200)]
@@ -190,8 +221,11 @@ def render_world_frame_gif(
         colors.setdefault(c, default_palette[i % len(default_palette)])
 
     vg.car_color = {ego_car: ego_color, **colors}
-    vg.x_margin = {ego_car: 15, **{c: 45 for c in model.cars}}
-    vg.y_margin = {ego_car: 15, **{c: 60 for c in model.cars}}
+    # x/y margin はセル内でEgoとNPCの矩形をずらして見やすくするためのもの。
+    # margin + car_width/car_height が grid_scale を超えないようにする
+    # （超えると上記と同じ理由で隣接レーンの車と誤って重なって見える）。
+    vg.x_margin = {ego_car: 10, **{c: grid_scale - vg.car_width - 10 for c in model.cars}}
+    vg.y_margin = {ego_car: 10, **{c: grid_scale - vg.car_height - 10 for c in model.cars}}
 
     out_dir = os.path.dirname(output_prefix)
     if out_dir:

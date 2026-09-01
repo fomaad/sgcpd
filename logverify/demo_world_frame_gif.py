@@ -22,7 +22,11 @@ OUT_DIR = "out_gif"
 
 if __name__ == "__main__":
     # 方法B: cut-in参照CPD（近距離のみに絞って見やすくする）
-    model_b, _box_id_of_b = build_cutin_reference(i_range=(-1, 0, 1))
+    # max_position_jump=1: 距離帯を1段ずつしか移動できないようにする。
+    # これにより、車線変更と距離帯の大ジャンプが同じ1遷移で同時に起きる
+    # ことがなくなり、アニメーションの直線補間がEgoを突っ切って見える
+    # アーティファクトを抑えられる（詳細はdocs参照）。
+    model_b, _box_id_of_b = build_cutin_reference(i_range=(-1, 0, 1), max_position_jump=1)
     paths_b = render_world_frame_gif(
         model_b, os.path.join(OUT_DIR, "world_cutin"), combined=True, ego_speed=1.0,
         max_step=4, num_model=6, zone_ahead_offset=1,
