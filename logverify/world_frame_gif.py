@@ -27,6 +27,27 @@ NPC側の position は（方法B・Cとも）Egoとの相対距離をそのま�
                          + NPCの相対position
 として画面上の座標に変換する（この変換自体は見た目のためのもので、
 CPDが表現するシナリオ集合の意味＝相対距離ベースを変えるものではない）。
+
+## 注意: 方法Bの距離帯（順序尺度）をそのまま座標として足すと衝突に見える
+
+方法B（`reference_models.build_cutin_reference`）のpositionは、
+`logverify/zones.py` が定義する BEHIND=-1 / NEAR=0 / MEDIUM=1 / FAR=2
+という**順序尺度の距離帯カテゴリ**であり、実際のメートル距離ではない
+（10.5節）。このうち NEAR=0 をそのまま「Egoの前進量 + 相対position」の
+式に代入すると、Egoのワールド座標にちょうど0を足すことになり、
+Egoとまったく同じ格子セルに描画されてしまう。これは「NPCがEgoに
+極めて近い（NEAR）」という抽象的な分類が、たまたま0という数値で
+表現されているために起きる見た目上のアーティファクトであり、
+モデルが「衝突するシナリオ」を表しているわけではない
+（衝突可能性の判定自体は9.4節の`ps_col`と組み合わせる別の話であり、
+本節の参照CPDにはまだ組み込んでいない。11.5節今後の課題）。
+
+これを避けるため、`zone_ahead_offset`引数で「0以上（NEAR/MEDIUM/FAR）の
+距離帯にだけ一律のオフセットを足す」ことができるようにした
+（BEHINDはEgoより手前で既に区別がつくため対象外）。方法Cのように
+positionが実際の格子（メートル単位）であるモデルでは、0は本当に
+「ほぼ同じ位置」を意味しうるため、デフォルト（0＝オフセットなし）の
+ままにしておくこと。
 """
 
 import os
@@ -62,6 +83,7 @@ def render_world_frame_gif(
     a_res: int = 8,
     max_step: Optional[int] = None,
     num_model: int = 10_000,
+    zone_ahead_offset: int = 0,
 ) -> List[str]:
     """model に Ego を car として追加した上で gcpd.enum_ss でシナリオを列挙し、
     Egoが前進するワールド座標系のGIFアニメーションとして書き出す。
@@ -87,6 +109,13 @@ def render_world_frame_gif(
         num_model: 列挙するシナリオ数の上限（gcpd.enum_ss に渡す）。方法Bの
             参照CPDのように非決定性が大きいモデルでは全列挙が非常に大きく
             なりうるため、可視化用には小さい値（例: 6）に絞るとよい。
+        zone_ahead_offset: NPCの相対position（0以上、＝Ego手前ではない側）
+            に一律で足すオフセット。方法Bの距離帯（NEAR=0など）をそのまま
+            Egoの絶対座標に足すと、NEARがちょうどEgoと同じ格子セルに
+            描画され、衝突しているように見えてしまう（本ファイル冒頭の
+            注意を参照）。方法Bを描画する場合は1以上を指定するとよい。
+            方法C（positionが実際の格子＝メートル単位）ではデフォルトの
+            0のままにしておくこと。
 
     Returns:
         生成されたGIFファイルのパスのリスト。
@@ -130,6 +159,8 @@ def render_world_frame_gif(
             ego_world_pos = ego_pos_v * ego_speed
             if npc_car in entries:
                 npc_lane_v, npc_pos_rel = entries[npc_car]
+                if npc_pos_rel >= 0:
+                    npc_pos_rel = npc_pos_rel + zone_ahead_offset
                 npc_world_pos = ego_world_pos + npc_pos_rel
                 combined_hs.append((npc_car, 0, npc_lane_v, round(npc_world_pos), s))
             combined_hs.append((ego_car, 0, ego_lane, round(ego_world_pos), s))

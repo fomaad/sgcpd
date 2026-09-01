@@ -25,7 +25,7 @@ if __name__ == "__main__":
     model_b, _box_id_of_b = build_cutin_reference(i_range=(-1, 0, 1))
     paths_b = render_world_frame_gif(
         model_b, os.path.join(OUT_DIR, "world_cutin"), combined=True, ego_speed=1.0,
-        max_step=4, num_model=6,
+        max_step=4, num_model=6, zone_ahead_offset=1,
     )
     print("方法B（ワールド座標系）:", paths_b)
 
