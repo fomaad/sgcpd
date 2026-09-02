@@ -247,6 +247,124 @@ def detect_cutin(
     return events
 
 
+def classify_fine(value: float, unit: float, max_bins: int = 12) -> int:
+    """value（rxまたはry）を、ego車両自身のサイズの一部（unit = 半分の
+    さらに1/n_bins）を単位とした整数の目盛りに丸める。
+
+    値の大きさを決める「単位」がego車両自身の物理サイズの一部
+    （例えばEGO_HALF_LENGTH/4）であることに変わりはない。すなわち、
+    9領域（n_bins=1相当）のように粗い場合はEGO周辺で何が起きているか
+    分からない、という問題に対し、この関数は「同じ物理的な単位を、
+    より細かく刻む」ことで対応する。分析用に選んだ恣意的なメートル値
+    （例えば0.5m単位）を使うわけではない。
+
+    |value| が unit*max_multiple を超えた場合は、それ以上細分せず
+    ±(max_multiple+1) に飽和させる（遠方は従来通り粗いまま）。
+
+    ---
+    English:
+    Rounds value (rx or ry) onto an integer scale whose unit is a fraction
+    of the ego vehicle's own size (unit = EGO_HALF_LENGTH/n_bins or
+    EGO_HALF_WIDTH/n_bins, say).
+
+    The unit that determines the granularity is still a fraction of the
+    ego vehicle's own physical size -- unlike the 9-area partition
+    (equivalent to n_bins=1), which is too coarse to see what is
+    happening right around ego, this function addresses that by cutting
+    the same physical unit more finely rather than introducing an
+    arbitrary analysis-chosen metric threshold (such as "0.5m bins").
+
+    If |value| exceeds unit*max_bins, it saturates at ±(max_bins+1)
+    instead of subdividing further (far away stays coarse, as before).
+    max_bins should be given in units of the *fine* bin (i.e. already
+    multiplied by n_bins if you want the saturation range expressed as a
+    multiple of the full ego_half_length/ego_half_width) --
+    compress_to_fine_relation_states below does this multiplication for
+    you.
+    """
+    if unit <= 0:
+        raise ValueError("unit must be positive")
+    n = value / unit
+    if n >= 0:
+        idx = int(n) if n < max_bins else max_bins + 1
+    else:
+        idx = -int(-n) if -n < max_bins else -(max_bins + 1)
+    return idx
+
+
+@dataclass
+class FineRelationState:
+    index: int
+    lane_fine: int      # ego_half_widthのn_bins分の1を単位とした目盛り
+    position_fine: int  # ego_half_lengthのn_bins分の1を単位とした目盛り
+    start_frame: int
+    end_frame: int
+
+
+def compress_to_fine_relation_states(
+    rxs: Sequence[Optional[float]],
+    rys: Sequence[Optional[float]],
+    ego_half_width: float = EGO_HALF_WIDTH,
+    ego_half_length: float = EGO_HALF_LENGTH,
+    n_bins: int = 4,
+    max_range: int = 3,
+) -> List[FineRelationState]:
+    """9領域（FOLLOW/OVERLAP/LEAD、右/同幅帯/左）ではEGOのすぐ近くで
+    何が起きているか区別がつかない場合に使う、より細かい版。
+    単位はego車両自身のサイズの1/n_binsのまま（恣意的な距離を導入しない）。
+
+    max_range: 分割せず飽和させる範囲を、ego_half_width/ego_half_length
+    「何個分」で指定する（9領域のFOLLOW/OVERLAP/LEADや右/同幅帯/左の
+    範囲がego_half_width/ego_half_length「1個分」に相当するのに対応する）。
+
+    ---
+    English:
+    A finer-grained version to use when the 9-area partition (FOLLOW/
+    OVERLAP/LEAD, right/same-width-band/left) cannot distinguish what is
+    happening right around ego. The unit stays a fraction (1/n_bins) of
+    the ego vehicle's own size (no arbitrary distance is introduced).
+
+    max_range: how far out (in units of ego_half_width/ego_half_length)
+    to keep subdividing before saturating (matching how the 9-area
+    partition's FOLLOW/OVERLAP/LEAD and right/same-width-band/left each
+    span exactly "1 unit" of ego_half_length/ego_half_width).
+    """
+    lane_unit = ego_half_width / n_bins
+    pos_unit = ego_half_length / n_bins
+    max_bins = n_bins * max_range
+
+    states: List[FineRelationState] = []
+    prev_key: Optional[Tuple[int, int]] = None
+
+    for frame, (rx, ry) in enumerate(zip(rxs, rys)):
+        if rx is None or ry is None:
+            continue
+        lane_val = classify_fine(ry, lane_unit, max_bins)
+        position_val = classify_fine(rx, pos_unit, max_bins)
+        key = (lane_val, position_val)
+        if prev_key is not None and key == prev_key:
+            states[-1].end_frame = frame
+            continue
+        states.append(
+            FineRelationState(index=len(states), lane_fine=lane_val, position_fine=position_val, start_frame=frame, end_frame=frame)
+        )
+        prev_key = key
+
+    return states
+
+
+def fine_relation_states_from_relative_xy(
+    rel_xy: Sequence[Tuple[float, float]],
+    ego_half_width: float = EGO_HALF_WIDTH,
+    ego_half_length: float = EGO_HALF_LENGTH,
+    n_bins: int = 4,
+    max_range: int = 3,
+) -> List[FineRelationState]:
+    rxs = [p[0] for p in rel_xy]
+    rys = [p[1] for p in rel_xy]
+    return compress_to_fine_relation_states(rxs, rys, ego_half_width, ego_half_length, n_bins, max_range)
+
+
 def detect_cutin_from_relative_xy(
     rel_xy: Sequence[Tuple[float, float]],
     side_lanes: Sequence[int] = (-1, 1),

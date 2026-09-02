@@ -531,3 +531,52 @@ The object returned by `reference_models.build_cutin_reference_9area_scenario` n
 `logverify/demo_sakikawa_cutin_operator.py` (`python3 -m logverify.demo_sakikawa_cutin_operator`) cross-checks, on the same 6 real logs used in Section 11.9 (0030, 0032, 0035, 0047, 0067, 0076), the verdict from `detect_cutin` against `vendor/trajectory_abstraction/src/abstraction_9area.py`'s own `abstract_cutin` verdict, confirming **agreement on all 6 logs**. Notably, 0032 and 0047 were UNSAT under the Section 11.10 model (which had rule 3, violated by their further lane change after merging), but `detect_cutin` correctly reports `True` (cut-in occurred) for both, exactly matching Mr. Sakikawa's own tool. Because further lane changes after the cut-in are no longer constrained by the structural model at all, no special-casing is needed for these two logs anymore.
 
 This design is consistent with the conclusion reached from Section 9.5 onward: the reference model's granularity, boundaries, and which property to check are all modeling decisions left to the analyst. Rather than forcing "the cut-in property" into a single SAT/UNSAT criterion, the natural design is to ask it directly with an operator dedicated to that property (here, reusing Mr. Sakikawa's sound rule as-is), while the CPD/SAT model's role is limited to providing a general (not cut-in-specific) vocabulary and structure.
+
+## 12. Root-cause analysis of a collision log using Method A (v0.6)
+
+### 12.1 Background: returning to Method A, targeting collision root-cause analysis
+
+Sections up through 11 focused on designing and verifying Methods B and C. Method B (how to use the reference model) is still under consideration, so it is left as-is for now; Method C (combining multiple logs) is also left as-is, since it becomes useful precisely at the stage of aggregating individual logs' root-cause findings. Instead, we returned to **Method A (directly abstracting a single log with Mr. Sakikawa's abstraction tool)** and focused on **root-cause analysis of a collision**. The target is AJISAI's cut-in scenario (the KSE2026 paper reports that 93 of 432 traces contain a collision). Checking the shared paper (`KSE2026_.pdf`, the AJISAI dataset paper) revealed that **no collision flag at all is included anywhere in AJISAI's released artifacts** (`jama_index.json`, `jama_summary.csv`, the `*.jama.json` sidecars) -- only the 4-axis road/position/direction/behavior label and consistency_ok. The paper's "93/432 contain a collision" statistic is presumably computed separately, by cross-referencing `groundtruth_size` (the oriented bounding-box sizes of ego and each NPC) against `groundtruth_kinematic` (world-frame positions and poses).
+
+So, for the 6 cut-in logs already used in the Method B/C demos (0030, 0032, 0035, 0047, 0067, 0076), we directly checked, using each vehicle's oriented bounding-box size (`groundtruth_size.vehicle_sizes`) and the relative coordinates (rx, ry) in ego's heading frame, whether the two rectangles overlap at any frame. **Only `TD-NI-AR-SD-N04-CI-0067.json` actually contains a collision** (rectangle overlap): frames 761-793, t=149.509s-150.293s, lasting 0.78s, with a maximum penetration depth of 0.255m. The other 5 logs all have a minimum clearance of at least 1.4m and never collide. Since the target was found among the 6 logs already on hand, no additional download was needed.
+
+### 12.2 Mr. Sakikawa's 9-area (coarse) abstraction reveals nothing about the cause
+
+Running `logverify/demo_collision_root_cause.py` on 0067 with the 9-area abstraction shows that from the start through frame 862 (which includes the entire collision), the log stays in a single state, `(lane=-1, position=+1)` (adjacent lane, ahead) -- nothing about what happened at the moment of collision is visible at all. This is a concrete instance of the user's original concern that "finding, within 1697 frames, where the cut-in is about to happen, where it just happened, and where the vehicles are apart, seems hard."
+
+### 12.3 Key finding: Mr. Sakikawa's lane boundary still classifies the encounter as "adjacent lane" even after a collision has occurred
+
+More importantly, Mr. Sakikawa's `detect_cutin` (Section 11.11) reports the cut-in transition `(lane=-1,position=+1) -> (lane=0,position=+1)` as occurring at **frame 863**. In other words, **the collision (frames 761-793) occurs and is entirely over before the frame at which the cut-in is judged to have "occurred" at all**. This happens because Mr. Sakikawa's lane boundary (`EGO_HALF_WIDTH`, i.e. half the ego vehicle's own width, and nothing else) **completely ignores the other vehicle's (the NPC's) own width**. In this collision, the NPC's lateral offset `ry` never goes below -1.80m even at its deepest point (still larger in magnitude than ego's own half-width, 0.95m), so by Mr. Sakikawa's definition it is still judged to be "in the adjacent lane" (`lane=-1`) throughout. But the actual rectangles, accounting for both vehicles' widths, can overlap once `|ry|` drops below the *sum* of ego's half-width (1.09m) and the NPC's half-width (0.97m) -- about 2.06m in this case -- which is well before `|ry|` would need to cross ego's own half-width alone. **A physical collision can therefore occur before the lane boundary is even crossed.** This is the opposite of the "excessive FP from independently abstracting distance and speed" issue raised in Section 9.5 -- it is a **false-negative-direction problem**: because Mr. Sakikawa's abstract_cutin/concrete_cutin rules do not account for the ego vehicle's own width, they are biased toward judging "not yet cut in," and this case concretely demonstrates that a physical collision can occur during that window.
+
+### 12.4 Visualizing the approach to collision with a finer near-ego abstraction
+
+To address this, `logverify/sakikawa_relations.py` was extended with an abstraction that keeps the 9-area framework but **subdivides only the region right around ego** (`classify_fine`, `compress_to_fine_relation_states`, `fine_relation_states_from_relative_xy`). The unit remains `EGO_HALF_WIDTH/n_bins` and `EGO_HALF_LENGTH/n_bins` (default n_bins=4) -- not an arbitrary metric value chosen for this analysis (a `max_range` argument specifies how many multiples of ego's half-width/half-length to keep subdividing before saturating, matching the 9-area partition's coarse behavior beyond that range). Applying this around 0067's collision gives:
+
+```
+(lane_fine=-10, position_fine=+8)  frames 721-730
+(lane_fine=-9,  position_fine=+8)  frames 731-732
+(lane_fine=-9,  position_fine=+7)  frames 733-749
+(lane_fine=-9,  position_fine=+6)  frames 750-752
+(lane_fine=-8,  position_fine=+6)  frames 753-775
+(lane_fine=-7,  position_fine=+6)  frames 776-789  <-- collision window
+(lane_fine=-7,  position_fine=+7)  frames 790-797
+(lane_fine=-6,  position_fine=+7)  frames 798-807
+```
+
+making visible the gradual lateral approach that the 9-area partition could not distinguish at all.
+
+### 12.5 The "why": deceleration timing/strength, and the looseness of the NPC's predicted trajectory
+
+Since abstraction alone cannot answer "why" the collision happened, `control_cmds` (ego's control commands) and `perception_objects` (the NPC's predicted paths, `predict_paths`) were read directly.
+
+**Deceleration timing and strength**: the NPC's lateral movement (lane change) begins at about t=148.11s. Ego's deceleration command (`control_cmds.longitudinal.acceleration` turning negative) also begins at almost the same time, t=148.11s -- **the reaction timing itself is not substantially late**. However, it takes about 1.4 seconds to reach strong deceleration (over -2 m/s^2): -1.0 m/s^2 is reached at about 148.44s, -2.0 m/s^2 at about 149.0s, and the peak of -2.55 m/s^2 at about 149.73s -- **by the time the collision window begins (149.51s), peak deceleration has still not been reached**. Of the user's hypothesis ("deceleration timing being late, or its strength being weak"), this case points to **a slow ramp-up to sufficient strength as the main factor, rather than late timing**.
+
+**Looseness of the NPC's predicted trajectory**: `perception_objects[].objects[].predict_paths` records several candidate predicted paths (each with a `confidence`) output by Autoware's prediction module. Even after the NPC actually begins its lateral movement (from t=148.11s onward), the highest-confidence predicted path keeps predicting that it will "keep its lane and continue straight" (`ry` barely changing), failing to anticipate the actual change in `ry` (gradually moving from around -2.4m toward 0). At the same time, the confidence itself drops from 1.0 to 0.2-0.3, and the number of candidate paths grows from 1 to 5 (the prediction is split between multiple hypotheses -- lane change or not). This directly corroborates, with actual log data, the hypothesis the user had going in: "the NPC's predicted trajectory is loose."
+
+### 12.6 Summary
+
+The 0067 collision is not attributable to a single cause but to several factors compounding: (a) Mr. Sakikawa's lane boundary accounts only for ego's own width, so the encounter is still judged "not yet crossed into the lane" while it enters the physical contact region (Section 12.3); (b) ego's deceleration reaction starts at a reasonable time, but ramps up too slowly to reach strong deceleration (Section 12.5); (c) the NPC's predicted trajectory fails to track the actual lane change in real time and keeps predicting "still going straight" (Section 12.5). The lesson from this case study is that Method A's coarse abstraction alone cannot reveal (a) at all, and (b) and (c) are visible only by reading the raw data directly, not from the abstraction itself.
+
+Implementation: `logverify/sakikawa_relations.py` (`classify_fine`, `compress_to_fine_relation_states`, `fine_relation_states_from_relative_xy`) and `logverify/demo_collision_root_cause.py` (`python3 -m logverify.demo_collision_root_cause [path-to-log.json]`).
+
+Future work: (1) extending Mr. Sakikawa's lane boundary to account for the NPC's own width as well, for a safer (less likely to miss a collision) judgment; (2) applying the same factor analysis to other collision logs (other behaviors, or cut-in logs with other parameters) to see whether a pattern generalizes; (3) using Method C to aggregate root-cause findings across multiple collision logs (not yet started).
