@@ -615,3 +615,23 @@ rule 3だけを単純に取り除き、合流遷移の制約（rule 2）だけ�
 衝突として赤枠で強調されている箱（k=-7,i=4〜k=-6,i=5）は、この図の上で**ego車線帯（緑）の外側にありながら、接触境界（赤破線）のすぐ内側**に位置しており、「lane境界を跨ぐ前に、接触境界を跨いで衝突が起きている」という12.3節の発見が、テキストではなく図形として一目で分かるようになった。Ego自身の挙動（巡航／減速開始／減速中／強い減速）は、12.7節の図と同様、一番上の固定スイムレーンにNPCの箱と同じ列で描き、両者の関係も維持している。
 
 実装は`logverify/collision_cpd_diagram.py`（`InstanceBox.ry_m`, `plot_instance_cpd_lateral`）と`logverify/demo_collision_cpd_annotated.py`（`vehicle_half_widths`、`build_boxes`が各箱に`ry_m`を設定する部分、`run`が`plot_instance_cpd_lateral`も呼び出す部分）。出力は`out_gif/collision_0067_cpd_lateral.png`（12.7節の図`collision_0067_cpd_annotated.png`とは別ファイルとして、両方を残している）。
+
+### 12.9 12.7/12.8節の図を、正式な`gcpd.Model`として構築する（v0.9）
+
+12.7・12.8節の図は、いずれも`logverify/collision_cpd_diagram.py`独自の描画ロジック（matplotlibで箱を手で並べる）であり、`gcpd.py`が定義する正式なCPDモデル（Z3上のBox/Pos/Lane関数、`gcpd.add_trans`等のSAT制約）そのものではなかった。ユーザーから「これをgcpdのモデルとしてつくれますか」との依頼があり、12.7/12.8節と全く同じ細かいnear/far格子（`RX_NEAR_CELL=1.0, RX_FAR_CELL=50.0, RX_NEAR_RANGE=15.0, GY=0.3`）を使って、log 0067だけを表す正式な`gcpd.Model`を構築した。
+
+使ったのは方法C（`logverify/multi_log_model.py`）の`build_union_model_near_far_grid`である。方法Cは本来「複数ログを1つのモデルに統合する」ためのものだが、入力を`[rel_xy]`という**1本のログだけ**にすることで、本質的には方法A（咲川氏のツールで1本のログを直接抽象化する「インスタンスCPD」）と同じ役割を、方法Cの機械（`gcpd.Model`の構築・membership checkによるSAT確認・シナリオ列挙）を流用して達成できる。
+
+`logverify/demo_collision_gcpd_model.py`（`python3 -m logverify.demo_collision_gcpd_model`）を作成し、以下を確認した。
+
+- 構築されたモデルは、ダミー開始箱を含めて**箱数51、max_step=65**。
+- `verify_logs_included`によるmembership check（SAT）: **True**（22.6秒）。すなわち、このモデルはlog 0067自身の箱列を正しく受理する、正式なCPDモデルとして構築できている。
+- 箱列（65個の圧縮状態）を調べると、`GY=0.3m`という非常に細かい格子のため、NPCの横方向の位置がわずかに揺れ戻る箇所で、**同じ格子セル(lane, position)を時間的に離れた2箇所以上で再訪している**（例: `(0,10)〜(0,15)`の範囲を2回通過、`(-9,16)`等も同様）。これは、単一ログから作ったモデルであっても、格子が細かすぎると（測定ノイズや実際の微小な揺れ戻りを拾って）本物の分岐・合流点が生じ得る、という11.2節で既に指摘していた問題（「データのノイズに対して格子が細かすぎることによる意図しない一般化」）が、単一ログでも起こりうる具体例である。
+- この分岐・合流のため、`count_scenarios`（全シナリオ数の列挙）と、Ego同期ワールド座標系GIF（`render_world_frame_gif`、strans同期遷移をSATで解く）はいずれも数分経っても終わらず、今回は省略した。これは11.6/11.7節で報告した「モデルの分岐が多いほどEgo同期アニメーションのSAT求解が重くなる」という既知の傾向と一致する。membership checkは分岐の有無によらず軽い（1本の箱列をなぞるだけ）ため、問題なく完了している。
+- モデルの構造そのものは、既存の`model_diagram.plot_model_with_ego_paper_style`でも描画できることを確認した（`out_gif/model_collision_0067_gcpd_fine.png`）。ただし、この図は12.7節で指摘した「NPC側は(lane,position)の順位、Ego側はステップ番号という、意味の異なる列軸を使っている」という制約をそのまま引き継いでいる（方法Cの既存ツールの汎用的な構造図であり、12.7/12.8節で作った、同じ列軸を共有する見やすい版とは別物）。
+
+まとめると、12.7/12.8節の分析結果は、単なる手書きの可視化ではなく、**方法Cの機械を1本のログに限定して適用することで、正式なgcpd.Model（Z3で解けるCPD）としても構築・検証できる**ことが分かった。ただし、衝突近辺を捉えるための細かい格子（特にGY=0.3mという横方向の細かさ）は、単一ログでも実際のノイズを分岐点として拾ってしまうため、このモデルをEgo同期GIFやシナリオ列挙に使うには格子を粗くする（分岐点を減らす）か、SAT側の高速化が必要になる、という新たな課題が見つかった。
+
+実装は`logverify/demo_collision_gcpd_model.py`。既存の`logverify/multi_log_model.py`（`build_union_model_near_far_grid`, `verify_logs_included`, `count_scenarios`）と`logverify/model_diagram.py`（`plot_model_with_ego_paper_style`）、`logverify/world_frame_gif.py`（`render_world_frame_gif`）を変更なしでそのまま再利用しており、新規のCPD構築ロジックは追加していない。
+
+今後の課題として、(1) 分岐点を許容しつつシナリオ列挙・Ego同期アニメーションを実用的な時間で終わらせる方法（格子を部分的に粗くする、SATソルバーへのヒント追加、列挙の打ち切り等）の検討、(2) 逆に「単一ログのモデルに分岐が生じること自体」を、ノイズ検出やログの品質チェックに積極的に使えないかの検討、が挙げられる。
