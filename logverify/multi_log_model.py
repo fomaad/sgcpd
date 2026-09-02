@@ -88,7 +88,11 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import gcpd
 from gcpd import Model
 
-from logverify.grid_bridge import compress_to_grid_states, compress_to_grid_states_variable
+from logverify.grid_bridge import (
+    compress_to_grid_states,
+    compress_to_grid_states_variable,
+    compress_to_grid_states_variable_hysteresis,
+)
 from logverify.membership import MembershipResult, check_membership, reset_solver
 
 
@@ -521,6 +525,56 @@ def build_union_model_near_far_grid(
     # representative value (MultiLogModel.gx is only a reference value for
     # logging/debugging and is not used in constructing the model itself).
     return MultiLogModel(model=m, box_id_of=box_id_of, sequences=sequences, gx=rx_near_cell, gy=gy)
+
+
+def build_single_log_model_hysteresis(
+    rel_xy: Sequence[Tuple[float, float]],
+    rx_near_cell: float,
+    rx_far_cell: float,
+    rx_near_range: float,
+    gy: float,
+    rx_margin: Optional[float] = None,
+    ry_margin: Optional[float] = None,
+    margin_ratio: float = 0.3,
+    car: str = "NPC",
+) -> MultiLogModel:
+    """1本のログから、ノイズ除去（ヒステリシス、12.10節）付きの近傍/遠方
+    非一様格子で`gcpd.Model`を構築する。
+
+    `build_union_model_near_far_grid`は複数ログを区別できるように格子を
+    選ぶことを目的としているため、1本のログしか渡さないと「区別すべき
+    相手がいない」状態になり、格子選択の目的とかみ合わない。本関数は
+    そのかわりに、`compress_to_grid_states_variable_hysteresis`
+    （境界ちょうどでの測定ノイズ・わずかな揺れ戻りによる見せかけの
+    分岐を、ヒステリシスで吸収する）を使って1本のログの箱列を作り、
+    それを`_model_from_sequences`にそのまま渡す（=方法Cの機械を
+    1本のログに限定して適用する、12.9節と同じ考え方）。
+
+    ---
+    English:
+    Builds a `gcpd.Model` from a single log, using the noise-removing
+    (hysteresis, Section 12.10) near/far non-uniform grid.
+
+    `build_union_model_near_far_grid` is designed to choose a grid that
+    keeps multiple logs distinguishable from one another; with only one
+    log there is nothing else to stay distinguishable from, so that
+    objective does not apply. This function instead builds the single
+    log's box sequence using
+    `compress_to_grid_states_variable_hysteresis` (which absorbs
+    apparent branch points caused by measurement noise or a small real
+    back-and-forth right at a cell boundary, via hysteresis), and passes
+    it directly to `_model_from_sequences` (the same idea as Section
+    12.9: applying Method C's machinery restricted to a single log).
+    """
+    rxs = [p[0] for p in rel_xy]
+    rys = [p[1] for p in rel_xy]
+    states = compress_to_grid_states_variable_hysteresis(
+        rxs, rys, rx_near_cell, rx_far_cell, rx_near_range, gy,
+        rx_margin=rx_margin, ry_margin=ry_margin, margin_ratio=margin_ratio,
+    )
+    sequence = [(s.k, s.i) for s in states]
+    m, box_id_of = _model_from_sequences([sequence], car)
+    return MultiLogModel(model=m, box_id_of=box_id_of, sequences=[sequence], gx=rx_near_cell, gy=gy)
 
 
 def verify_logs_included(mlm: MultiLogModel, car: Optional[str] = None) -> List[MembershipResult]:

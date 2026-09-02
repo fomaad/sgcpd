@@ -243,6 +243,229 @@ def compress_to_grid_states_variable(
     return states
 
 
+def hysteresis_filter_indices(
+    values: Sequence[float], idx_fn, margin: float
+) -> List[int]:
+    """`idx_fn`（値について単調非減少な、階段状の格子インデックス関数。
+    `grid_index_centered`や`grid_index_variable`がこれにあたる）を、
+    境界をまたいだ瞬間にすぐ切り替えるのではなく、**境界を`margin`だけ
+    超えて初めて切り替える**、ヒステリシス（シュミットトリガー）付きで
+    適用する。
+
+    これは、12.9節で見つかった「格子が細かいと、測定ノイズやわずかな
+    揺れ戻りだけで格子セルの境界をまたぎ、それが本物の分岐点として
+    モデルに現れてしまう」という問題への対処である。境界ちょうどに
+    値がとどまり続けると、ヒステリシスなしの量子化ではノイズによって
+    セルをまたぐ→戻る→またぐ…を繰り返すが、本関数は「今のセルから
+    margin分だけ余分に踏み出さない限り、セルを移らない」という制約を
+    課すことで、この種の chattering（びびり）を吸収する。
+
+    実装は、直近に「今のインデックスで安定していた」値
+    （`last_stable_value`）と新しい値の間で、`idx_fn`が実際に切り替わる
+    境界点を二分探索で求め、新しい値がその境界からさらに`margin`だけ
+    先に進んでいる場合にのみインデックスの変更を確定する
+    （`idx_fn`の具体的な形（一様格子か、near/far可変格子か）に依存しない
+    汎用的な実装）。
+
+    Args:
+        values: 元の連続値の時系列（例: rx または ry）。
+        idx_fn: 値について単調非減少な格子インデックス関数
+            （例: `lambda v: grid_index_centered(v, gy)`）。
+        margin: 境界を実際に越えたと判定するための、余分に必要な距離
+            （valuesと同じ単位、例: メートル）。0にすると通常の
+            （ヒステリシスなしの）量子化と同じ結果になる。
+
+    Returns:
+        各フレームに対応する、ヒステリシス適用後のインデックスのリスト。
+
+    ---
+    English:
+    Applies `idx_fn` (a monotonically non-decreasing, step-shaped grid
+    index function -- `grid_index_centered` and `grid_index_variable`
+    both qualify) with hysteresis (a Schmitt-trigger characteristic):
+    rather than switching the instant a boundary is crossed, it switches
+    only once the value has moved **an extra `margin` past the
+    boundary**.
+
+    This addresses the problem found in Section 12.9: with a fine grid,
+    measurement noise or a small real back-and-forth is enough to cross a
+    grid-cell boundary, and that crossing then shows up in the model as a
+    genuine branch point. If a value sits right at a boundary,
+    hysteresis-free quantization repeatedly crosses back and forth as
+    noise pushes it one way then the other; this function absorbs that
+    chattering by requiring the value to step an extra `margin` past the
+    current cell before it is allowed to leave that cell.
+
+    Implementation: for the most recent value at which the index was
+    stably `cur` (`last_stable_value`), and a new value whose raw index
+    differs, the actual switching boundary between them is located by
+    bisection (generic, independent of whether `idx_fn` is the uniform
+    grid or the near/far variable grid), and the index change is
+    accepted only once the new value has moved a further `margin` beyond
+    that boundary.
+
+    Args:
+        values: the original continuous-valued time series (e.g. rx or ry).
+        idx_fn: a monotonically non-decreasing grid index function (e.g.
+            `lambda v: grid_index_centered(v, gy)`).
+        margin: the extra distance required, in the same units as
+            `values` (e.g. meters), before a boundary crossing is
+            accepted as real. 0 reproduces ordinary (hysteresis-free)
+            quantization.
+
+    Returns:
+        The list of hysteresis-applied indices, one per frame.
+    """
+    out: List[int] = []
+    cur: Optional[int] = None
+    last_stable_value: Optional[float] = None
+
+    for v in values:
+        raw = idx_fn(v)
+        if cur is None:
+            cur = raw
+            last_stable_value = v
+            out.append(cur)
+            continue
+        if raw == cur:
+            last_stable_value = v
+            out.append(cur)
+            continue
+
+        # raw != cur: idx_fn is monotonic, so the boundary crossed lies
+        # strictly between last_stable_value (index == cur) and v
+        # (index == raw). Bisect to find it. `a` is always anchored on the
+        # "still cur" side and `b` on the "already raw" side -- NOT sorted
+        # by numeric value, since last_stable_value can be either larger
+        # or smaller than v depending on whether values are increasing or
+        # decreasing.
+        a, b = last_stable_value, v
+        direction = 1 if v > last_stable_value else -1
+        for _ in range(60):
+            mid = (a + b) / 2.0
+            if idx_fn(mid) == cur:
+                a = mid
+            else:
+                b = mid
+        boundary = b
+
+        crossed = (v >= boundary + margin) if direction > 0 else (v <= boundary - margin)
+        if crossed:
+            cur = raw
+            last_stable_value = v
+        # else: treated as noise -- stay at `cur`, keep last_stable_value
+        # anchored at its old (solidly-cur) value.
+        out.append(cur)
+
+    return out
+
+
+def to_grid_indices_variable_hysteresis(
+    rxs: Sequence[Optional[float]],
+    rys: Sequence[Optional[float]],
+    rx_near_cell: float,
+    rx_far_cell: float,
+    rx_near_range: float,
+    gy: float,
+    rx_margin: Optional[float] = None,
+    ry_margin: Optional[float] = None,
+    margin_ratio: float = 0.3,
+) -> Tuple[List[int], List[int]]:
+    """`to_grid_indices_variable`のヒステリシス付き版。rx・ryそれぞれの
+    時系列全体に対して`hysteresis_filter_indices`を適用する。
+
+    rx_margin・ry_marginを省略した場合は、それぞれ
+    `margin_ratio * rx_near_cell`・`margin_ratio * gy`
+    （デフォルトでセルサイズの30%）を使う。Egoに近い領域のセル
+    （rx_near_cell）を基準にするのは、ノイズによる分岐が問題になるのは
+    主にEgo近傍の細かいセルであり、遠方の粗いセル（rx_far_cell）の
+    境界をたまたま跨いでも実害が小さいため。
+
+    ---
+    English:
+    Hysteresis version of `to_grid_indices_variable`. Applies
+    `hysteresis_filter_indices` to the whole time series of rx and of ry
+    separately.
+
+    If rx_margin/ry_margin are omitted, `margin_ratio * rx_near_cell` and
+    `margin_ratio * gy` are used respectively (30% of the cell size by
+    default). The near-Ego cell size (rx_near_cell) is used as the basis
+    because noise-induced branching is mainly a problem in the fine cells
+    near Ego; incidentally crossing a boundary in the coarse far-away
+    cells (rx_far_cell) does little harm.
+    """
+    rx_margin = rx_margin if rx_margin is not None else margin_ratio * rx_near_cell
+    ry_margin = ry_margin if ry_margin is not None else margin_ratio * gy
+
+    valid = [
+        (rx is not None and ry is not None and not np.isnan(rx) and not np.isnan(ry))
+        for rx, ry in zip(rxs, rys)
+    ]
+    rxs_valid = [rx for rx, v in zip(rxs, valid) if v]
+    rys_valid = [ry for ry, v in zip(rys, valid) if v]
+
+    i_seq = hysteresis_filter_indices(
+        rxs_valid, lambda v: grid_index_variable(v, rx_near_cell, rx_far_cell, rx_near_range), rx_margin
+    )
+    k_seq = hysteresis_filter_indices(rys_valid, lambda v: grid_index_centered(v, gy), ry_margin)
+
+    is_ = iter(i_seq)
+    ks_ = iter(k_seq)
+    result_i: List[Optional[int]] = []
+    result_k: List[Optional[int]] = []
+    for v in valid:
+        if v:
+            result_i.append(next(is_))
+            result_k.append(next(ks_))
+        else:
+            result_i.append(None)
+            result_k.append(None)
+    return result_i, result_k
+
+
+def compress_to_grid_states_variable_hysteresis(
+    rxs: Sequence[Optional[float]],
+    rys: Sequence[Optional[float]],
+    rx_near_cell: float,
+    rx_far_cell: float,
+    rx_near_range: float,
+    gy: float,
+    rx_margin: Optional[float] = None,
+    ry_margin: Optional[float] = None,
+    margin_ratio: float = 0.3,
+) -> List[GridState]:
+    """`compress_to_grid_states_variable`のヒステリシス付き版（ノイズ除去の
+    抽象化）。境界ちょうどでの揺れ戻りによる余計な状態変化・分岐点を
+    抑えた上で、イベント駆動の圧縮（連続して同じ(i,k)に留まる区間を
+    1状態にまとめる）を行う。
+
+    ---
+    English:
+    Hysteresis version of `compress_to_grid_states_variable` (a
+    noise-removal abstraction). Suppresses spurious state changes/branch
+    points caused by back-and-forth right at a boundary, then performs
+    the same event-driven compression (a run of consecutive frames
+    staying in the same (i, k) collapsed into one state).
+    """
+    i_seq, k_seq = to_grid_indices_variable_hysteresis(
+        rxs, rys, rx_near_cell, rx_far_cell, rx_near_range, gy,
+        rx_margin=rx_margin, ry_margin=ry_margin, margin_ratio=margin_ratio,
+    )
+
+    states: List[GridState] = []
+    prev_ik: Optional[Tuple[int, int]] = None
+    for frame, (i, k) in enumerate(zip(i_seq, k_seq)):
+        if i is None:
+            continue
+        if prev_ik is not None and (i, k) == prev_ik:
+            states[-1].end_frame = frame
+            continue
+        states.append(GridState(index=len(states), i=i, k=k, start_frame=frame, end_frame=frame))
+        prev_ik = (i, k)
+
+    return states
+
+
 def grid_states_from_relative_xy(
     rel_xy: Sequence[Tuple[float, float]], gx: float, gy: float
 ) -> List[GridState]:

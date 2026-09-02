@@ -637,3 +637,49 @@ In summary, the Section 12.7/12.8 analysis turns out not to be merely a hand-dra
 Implementation: `logverify/demo_collision_gcpd_model.py`. It reuses `logverify/multi_log_model.py` (`build_union_model_near_far_grid`, `verify_logs_included`, `count_scenarios`), `logverify/model_diagram.py` (`plot_model_with_ego_paper_style`), and `logverify/world_frame_gif.py` (`render_world_frame_gif`) exactly as they are -- no new CPD-construction logic was added.
 
 Future work: (1) investigating how to let scenario enumeration and the Ego-synchronized animation finish in practical time while still tolerating branch points (partially coarsening the grid, adding hints to the SAT solver, capping enumeration, etc.); (2) conversely, investigating whether "a single-log model developing branches at all" could itself be put to active use for noise detection or log quality checks.
+
+### 12.10 A noise-removal abstraction (hysteresis, v0.10)
+
+Regarding the branch points found in Section 12.9 (revisits such as `(-10,16)` and `(0,10)` through `(0,15)`), the user asked, "can a noise-removal abstraction be done?" Checking the log's raw data (rx, ry) directly revealed that the branch points were actually a mix of two different kinds of phenomena.
+
+- **Genuine noise** (e.g. the revisits around `(-10,16)`, `(-9,16)`, `(-9,17)`): the NPC's lateral position (ry) sits right at a grid-cell boundary, and small measurement noise (or a real few-tens-of-centimeters wobble) makes it repeatedly cross in and out of the cell.
+- **Physically real behavior** (e.g. the revisit around `(0,10)` through `(0,15)`): tracing the actual rx values shows that after merging, the NPC genuinely pulls about 10m away from Ego and then closes to about 10m again -- a real car-following dynamic (a slow back-and-forth in following distance). This is not measurement noise; it is a genuine physical round trip through the same grid cell.
+
+Based on this distinction, a **hysteresis (Schmitt-trigger) grid quantizer** that absorbs only the former (chattering right at a grid boundary) was added to `logverify/grid_bridge.py`.
+
+- `hysteresis_filter_indices(values, idx_fn, margin)`: for any monotonically non-decreasing grid index function of value (a generic implementation usable with either `grid_index_centered` or `grid_index_variable`), enforces the constraint that "the cell is not left unless the value steps an extra `margin` past the current cell's boundary." The actual boundary where the grid index switches, between the most recently stable value and the new value, is located by bisection, and the decision is made from how far past it the new value has moved.
+- `to_grid_indices_variable_hysteresis` / `compress_to_grid_states_variable_hysteresis`: applies this to both rx and ry of the near/far variable grid, and is a drop-in replacement for `compress_to_grid_states_variable`, returning compressed states in the same form (a list of `GridState`).
+
+Applying this with a margin ratio of `margin_ratio=0.3` (requiring 30% of the cell size past the boundary) to 0067's same fine grid (`RX_NEAR_CELL=1.0, RX_FAR_CELL=50.0, RX_NEAR_RANGE=15.0, GY=0.3`) gave:
+
+| | boxes | branch points (duplicates) |
+|---|---|---|
+| without hysteresis | 65 | `(-10,16), (-9,16), (-9,17), (0,10) through (0,15), (1,15), (2,17), (3,17)` (12 total) |
+| with hysteresis | 54 | `(-9,17), (0,10) through (0,15)` (7 total, all genuine physical round trips) |
+
+The branch points caused by boundary chattering were removed entirely, leaving only the ones where a genuine physical round trip actually occurred (`(0,10)` through `(0,15)` is the post-merge following-distance wobble described above; `(-9,17)` is likewise a temporary approach-and-separation from a real speed difference while still far away). This result shows that "apparent branching from noise" and "real branching the data correctly captured" can be distinguished -- and forcibly erasing the latter would discard genuine, important information (that the following distance does not stabilize immediately even after merging), so it was deliberately left in place.
+
+**Caveat**: setting the hysteresis margin ratio (`margin_ratio`) too large (tested at an order of magnitude larger) risks absorbing even genuinely necessary forward progress as "noise", even in the wide cells of the far region (`rx_far_cell=50m`), making the abstraction excessively coarse. Trying `margin_ratio` between 0.1 and 0.5 all gave essentially the same effect on removing 0067's main branch points -- the result was stable across that range.
+
+Implementation: `logverify/grid_bridge.py` (`hysteresis_filter_indices`, `to_grid_indices_variable_hysteresis`, `compress_to_grid_states_variable_hysteresis`) and `logverify/multi_log_model.py` (`build_single_log_model_hysteresis`, which builds a `gcpd.Model` from a single log with hysteresis applied).
+
+### 12.11 Automatically deriving the grid from vehicle size (v0.11)
+
+This addresses the user's other request: "can automatic refinement -- fine only where it matters, coarse elsewhere -- be done?" The near/far grid parameters used in Sections 12.7-12.9 (`RX_NEAR_CELL=1.0, RX_FAR_CELL=50.0, RX_NEAR_RANGE=15.0, GY=0.3`) were, in fact, hand-picked while looking at log 0067 and judging "this seems about right" -- a departure from the consistent policy, in force since Section 12.4 (`classify_fine`), of "using the vehicles' own physical size as the unit, not an arbitrary meter value chosen for the analysis."
+
+A new module, `logverify/auto_grid.py`, now derives these four parameters automatically from `groundtruth_size.vehicle_sizes` (ego's and the NPC's own half-width and half-length).
+
+- `auto_gy`: uses the same idea as Mr. Sakikawa's lane boundary (dividing `EGO_HALF_WIDTH` into `n_bins` parts) to get the lateral cell size.
+- `auto_near_range`: applies the same idea as Section 12.8's contact boundary (`ego_half_width + npc_half_width`) to the vehicles' longitudinal size, taking `near_range_factor` times the sum of both half-lengths as the "vicinity".
+- `auto_near_cell`: divides the sum of both half-lengths into `near_cell_bins` parts to get the near region's longitudinal cell size.
+- `auto_far_cell`: lumps everything outside the near region into a coarse cell of `far_cell_factor` times `near_range`.
+
+From 0067's vehicle sizes (ego half-length 2.443m/half-width 0.95m, NPC half-length 2.32m/half-width 0.97m), with default bin counts/factors (`n_bins=3, near_range_factor=3.0, near_cell_bins=5.0, far_cell_factor=5.0`), the automatically derived values were `gy=0.364m, rx_near_cell=0.953m, rx_near_range=14.289m, rx_far_cell=71.445m` -- all close to the hand-picked values (`0.3m, 1.0m, 15.0m, 50.0m`). This is evidence that this physically-grounded derivation is sound rather than an ad-hoc lucky guess.
+
+Combining these auto-derived parameters with Section 12.10's hysteresis (`margin_ratio=0.3`) reduced the box count from 55 to 45 (40 including the dummy start box), and the branch points to 6 (`(-8,16)`, `(0,11)` through `(0,15)` -- of which `(0,11)` through `(0,15)` is the genuine physical round trip confirmed in Section 12.10). Building a `gcpd.Model` from this auto-derived grid plus hysteresis, using `build_single_log_model_hysteresis` in `logverify/multi_log_model.py`, gave a model with 40 boxes and max_step=45 (including the dummy start box), and the membership check was SAT (about 10 seconds -- faster than the 22.6 seconds for Section 12.9's 51-box, 65-step model).
+
+This confirms that the refinement parameters themselves -- for "fine only around the important region (where a collision can occur), coarse elsewhere" -- can be derived automatically from an objective basis (the vehicles' physical size), rather than requiring the analyst to hand-tune them while looking at each log.
+
+Implementation: `logverify/auto_grid.py` (`auto_gy`, `auto_near_range`, `auto_near_cell`, `auto_far_cell`, `auto_grid_params`, `auto_grid_params_from_ajisai`) and `logverify/demo_auto_grid.py` (`python3 -m logverify.demo_auto_grid`, comparing the manual grid against the auto-derived grid, with and without hysteresis, four ways).
+
+Future work: (1) empirically determining reasonable values for the bin counts/factors themselves (`n_bins`, `near_range_factor`, etc. -- currently initial values borrowed from the `classify_fine`/contact-boundary reasoning) using multiple collision logs; (2) likewise determining a standard value for the hysteresis `margin_ratio` after validating against more logs; (3) measuring how much the "scenario enumeration / Ego-synchronized GIF is slow" problem found in Section 12.9 actually improves from the branch-point reduction achieved in this section.
