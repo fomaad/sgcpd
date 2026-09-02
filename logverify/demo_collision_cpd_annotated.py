@@ -12,11 +12,17 @@ How to run / 実行方法:
 import json
 import sys
 
-from logverify.collision_cpd_diagram import EventAnnotation, InstanceBox, plot_instance_cpd_annotated
+from logverify.collision_cpd_diagram import (
+    EventAnnotation,
+    InstanceBox,
+    plot_instance_cpd_annotated,
+    plot_instance_cpd_lateral,
+)
 from logverify.grid_bridge import compress_to_grid_states_variable, relative_xy_from_ajisai_groundtruth
 
 DEFAULT_LOG_PATH = "/mnt/user-data/uploads/Downloads/TD-NI-AR-SD-N04-CI-0067.json"
 OUT_PATH = "out_gif/collision_0067_cpd_annotated.png"
+OUT_PATH_LATERAL = "out_gif/collision_0067_cpd_lateral.png"
 
 # 衝突の近辺だけを細かくするための格子。rx（縦方向）はego近傍
 # (|rx|<=RX_NEAR_RANGE)だけ1mセルで細かく、それより遠くは50mセルで粗く
@@ -104,6 +110,20 @@ def ego_state_at(data, frame_start, frame_end, use_endpoint: bool = False):
     return f"強い減速\n({a_min:+.2f})", "#ffb3b3"
 
 
+def vehicle_half_widths(data):
+    """ego・NPCそれぞれの車体半幅(m)を groundtruth_size から取り出す。
+
+    ---
+    English:
+    Returns ego's and the NPC's own vehicle half-width (m) from
+    groundtruth_size.
+    """
+    sizes = {v["name"]: v["size"] for v in data["groundtruth_size"]["vehicle_sizes"]}
+    ego_size = sizes["ego"]
+    npc_size = sizes.get("npc1", list(sizes.values())[1])
+    return ego_size["y"] / 2, npc_size["y"] / 2
+
+
 def build_boxes(json_path: str):
     data = _load(json_path)
     rel_xy = relative_xy_from_ajisai_groundtruth(json_path)
@@ -144,6 +164,7 @@ def build_boxes(json_path: str):
                 note="粗い抽象化\n(rx>15m)",
                 ego_state=ego_label,
                 ego_color=ego_color,
+                ry_m=rys[far_box[-1].end_frame],
             )
         )
 
@@ -151,6 +172,7 @@ def build_boxes(json_path: str):
         band = "ego" if abs(s.k) <= EGO_LANE_K_BOUND else "side"
         is_collision = s.start_frame <= coll_end and s.end_frame >= coll_start
         ego_label, ego_color = ego_state_at(data, s.start_frame, s.end_frame)
+        mid_frame = (s.start_frame + s.end_frame) // 2
         boxes.append(
             InstanceBox(
                 label=f"NPC\n(k={s.k},i={s.i})",
@@ -161,6 +183,7 @@ def build_boxes(json_path: str):
                 note="衝突" if is_collision else None,
                 ego_state=ego_label,
                 ego_color=ego_color,
+                ry_m=rys[mid_frame],
             )
         )
 
@@ -175,6 +198,7 @@ def build_boxes(json_path: str):
                 note="粗い抽象化\n(以後の車線変更等は割愛)",
                 ego_state=ego_label,
                 ego_color=ego_color,
+                ry_m=rys[post_box[0].start_frame],
             )
         )
 
@@ -253,6 +277,18 @@ def run(json_path: str) -> None:
         events=events,
     )
     print(f"\n図を書き出しました: {path}")
+
+    ego_half_width, npc_half_width = vehicle_half_widths(data)
+    path_lateral = plot_instance_cpd_lateral(
+        boxes,
+        OUT_PATH_LATERAL,
+        ego_half_width=ego_half_width,
+        npc_half_width=npc_half_width,
+        title="TD-NI-AR-SD-N04-CI-0067: 横方向オフセット(ry)を縦位置で表したインスタンスCPD",
+        events=events,
+        y_scale=1.4,
+    )
+    print(f"図を書き出しました: {path_lateral}")
 
 
 if __name__ == "__main__":
