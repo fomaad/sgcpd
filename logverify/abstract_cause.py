@@ -265,3 +265,58 @@ class AbstractCauseLabels:
     decel_adequacy: Optional[str] = None
     pred_reliability: Optional[str] = None
     contact_margin: Optional[str] = None
+
+
+def box_aggregated_deceleration_ratio(
+    rxs, gk, cc, start_frame: int, end_frame: int, eh_l: float, nh_l: float, pad_frames: int = 10
+) -> Optional[float]:
+    """12.12/12.13節で見つかった「減速の十分性」演算子の不安定さ（`v^2/(2d)`
+    が単一フレームの評価に極めて敏感なこと）への対処。単一フレームで
+    評価するのではなく、**その値が属するCPDの箱（`GridState`）の区間全体**
+    をclosing_speedと`achieved`の平均化ウィンドウとして使う。
+
+    12.14節で導入した「スナップショット列＝CPDの箱列」という考え方と
+    同じで、CPDの箱そのものが自然な時間積分の単位になっている、という
+    発見に基づく（詳細は12.15節）。
+
+    Returns:
+        achieved/required の比。requiredが有限かつ正でない場合はNone
+        （すでに接触範囲に入っている等、比では語れない状況）。
+
+    ---
+    English:
+    Addresses the instability of the deceleration-adequacy operator found
+    in Sections 12.12/12.13 (that `v^2/(2d)` is extremely sensitive to a
+    single-frame evaluation). Rather than evaluating at a single frame,
+    uses **the whole interval of the CPD box (`GridState`) that value
+    belongs to** as the averaging window for both closing_speed and
+    `achieved`.
+
+    This follows directly from Section 12.14's "snapshot sequence = CPD
+    box sequence" idea: the CPD box itself turns out to be a natural
+    unit of time-integration (see Section 12.15 for details).
+
+    Returns:
+        The ratio achieved/required, or None if required is not finite
+        and positive (e.g. already within contact range, where a ratio
+        is not meaningful).
+    """
+    t0, t1 = gk[start_frame]["timestamp"], gk[end_frame]["timestamp"]
+    dt = t1 - t0
+    if dt > 0:
+        i0, i1 = start_frame, end_frame
+    else:
+        i0, i1 = max(0, start_frame - pad_frames), min(len(rxs) - 1, end_frame + pad_frames)
+        dt = gk[i1]["timestamp"] - gk[i0]["timestamp"]
+    closing = (rxs[i0] - rxs[i1]) / dt if dt > 0 else 0.0
+    mid = (start_frame + end_frame) // 2
+    dist = rxs[mid] - (eh_l + nh_l)
+    required = required_deceleration_magnitude(closing, dist)
+    if not math.isfinite(required) or required <= 0:
+        return None
+    accs = [abs(e["longitudinal"]["acceleration"]) for e in cc if t0 <= e["timestamp"] <= t1]
+    if not accs:
+        nearest = min(cc, key=lambda e: abs(e["timestamp"] - gk[mid]["timestamp"]))
+        accs = [abs(nearest["longitudinal"]["acceleration"])]
+    achieved = sum(accs) / len(accs)
+    return achieved / required
