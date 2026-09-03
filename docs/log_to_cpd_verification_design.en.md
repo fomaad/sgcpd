@@ -714,3 +714,17 @@ Future work (analysis ideas raised in conversation, recorded here):
 4. **Counterfactual analysis**: within a `gcpd.Model`, check via the SAT solver whether hypothetically replacing a box's abstract value (e.g., deceleration adequacy) with "adequate" would make `ps_col` (Section 9.4's collision predicate) UNSAT (i.e., whether fixing that one factor would have avoided the collision) -- a per-factor contribution analysis.
 5. **Checking temporal-logic-style properties**: verifying CTL/LTL-style properties such as "prediction reliability always becomes stale or low-confidence before contact margin reaches contact-possible", either within the SAT/gcpd.Model framework or via direct pattern matching over the compressed state sequence -- likely achievable in the same style as Section 11.11's `detect_cutin` (a local, existential pattern match).
 6. **Sensitivity analysis**: varying the operators' internal thresholds (ratios) such as `overkill_ratio`, `confidence_threshold`, `approach_ratio`, and checking how stable the classification is (whether a small threshold change flips "weak" to "adequate").
+
+### 12.13 Time-series visualization of the abstract-interpretation results (v0.13)
+
+The user asked "can you visualize the result of the abstraction?" ("抽象化あとを可視化してもらえますか？"). In response, a new module `logverify/abstract_cause_diagram.py` (`plot_abstract_cause_timeline`) was built, which visualizes the classification results of Section 12.12's three abstract-interpretation operators as swimlanes (Gantt-chart-like bands) laid out along real time.
+
+Where Sections 12.7-12.9's instance CPD laid "boxes compressed by the grid" out in columns to express chronological order, this diagram puts **real time itself** on the horizontal axis, and overlays each of the three abstract values' classification results -- deceleration adequacy, NPC prediction reliability, and lateral contact margin -- as color-coded bands, one band per run of consecutive identical labels. At the top, for context, the transitions of the NPC's box under the fine-grained near-ego abstraction (Section 12.4) are overlaid on the same time axis.
+
+Applying this to 0067 (`out_gif/collision_0067_abstract_cause_timeline.png`) gave:
+
+- **Lateral contact margin** transitions cleanly through "approaching -> contact -> contact-possible", lining up neatly with the collision window (t=149.51-150.29s).
+- **NPC prediction reliability** stays "low-confidence" throughout the entire displayed range (consistent with Section 12.12's finding).
+- **Deceleration adequacy** stays "very weak" up to just before the cut-in detection (t~=148.11s), then oscillates "weak" -> "very weak", before abruptly flipping to "overkill" right before the collision window and remaining "overkill" for the entire window. This abrupt flip is exactly the operator's own instability (its sensitivity to the exact instant of evaluation), noted in Section 12.12, made visible as a picture -- it is displayed honestly rather than hidden (this diagram will also serve as a good baseline for comparison once the operator is improved to a time-integrated judgment in future work).
+
+Implementation: `logverify/abstract_cause_diagram.py` (`TimeSegment`, `_compress_segments`, `plot_abstract_cause_timeline`) and `logverify/demo_abstract_cause_diagram.py` (`python3 -m logverify.demo_abstract_cause_diagram`).
