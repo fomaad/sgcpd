@@ -215,6 +215,94 @@ def auto_grid_params_naive_uniform(
     return AutoGridParams(gy=gy, rx_near_cell=cell_width, rx_near_range=rx_extent, rx_far_cell=cell_width)
 
 
+def search_minimal_purity_grid(
+    rxs, rys, gy: float, near_range: float, onset_frames,
+    near_cell_candidates=None, far_cell_candidates=None, margin_ratio: float = 0.3,
+):
+    """12.25節への追記: near_cell・far_cellを`near_range`に対して固定せず、
+    候補の組み合わせを総当たりし、指定した`onset_frames`(1つ以上の
+    safety modelのonsetフレームのリスト)すべてに対してpureになる中で
+    箱数が最小の(near_cell, far_cell)を探す。
+
+    ユーザーからの指摘「C&C基準・RSS基準の格子は、near/farの粒度を
+    変えれば箱数を減らせるのではないか」に応えるための関数。
+    `auto_near_range_from_risk_frame`はnear_rangeだけを安全性モデルに
+    連動させ、near_cell/far_cellは車両物理サイズ由来の値を流用して
+    いたが、これは「なぜその値でなければならないか」の必然性がなく、
+    実際に粒度を独立して調整すれば箱数を大きく減らせることが
+    (このモジュールの呼び出し元での実験で)確認されている。
+
+    注意: purity(pure/impureの判定)は、ヒステリシスで圧縮された箱の
+    境界がonsetフレームのちょうど開始位置に来るかどうかという、
+    セルサイズに対して滑らかではない(単調でない)判定である。すなわち
+    「もっと粗いセルでもたまたまpureになる」ことがあり得る——本関数が
+    返す(near_cell, far_cell)は、あくまで与えられた候補集合とこの1本の
+    ログに対して最小箱数を達成する組み合わせであり、他のログでも同じ
+    組み合わせがpureであり続ける保証はない(過学習のリスクがある)。
+    複数ログでの頑健性の検証は今後の課題。
+
+    Returns:
+        (best_near_cell, best_far_cell, best_n_boxes) のタプル。
+        条件を満たす組み合わせが候補内に見つからない場合は
+        (None, None, None)。
+
+    ---
+    English: Addendum to Section 12.25. Rather than fixing near_cell/
+    far_cell at the vehicle-geometry-derived values while only tying
+    near_range to the safety model, this brute-force searches candidate
+    (near_cell, far_cell) combinations and returns the one with the
+    fewest resulting boxes that is pure with respect to every frame in
+    `onset_frames` (one or more safety models' onset frames).
+
+    Responds to the user's observation that "the C&C-guided and
+    RSS-guided grids could probably use fewer boxes if near/far
+    granularity were tuned independently rather than reused from the
+    vehicle-geometry grid" -- confirmed by experiment to be correct.
+
+    Caveat: purity is not a smooth (monotonic) function of cell size --
+    a coarser cell can, by coincidence of where the hysteresis-filtered
+    box boundary happens to land, still be pure. The (near_cell, far_cell)
+    this function returns is only the best combination for this one log
+    among the given candidates; there is no guarantee the same
+    combination stays pure on other logs (a risk of overfitting).
+    Checking robustness across multiple logs is future work.
+
+    Returns:
+        (best_near_cell, best_far_cell, best_n_boxes), or
+        (None, None, None) if no candidate combination satisfies purity
+        for every onset frame.
+    """
+    from logverify.grid_bridge import compress_to_grid_states_variable_hysteresis
+
+    if near_cell_candidates is None:
+        near_cell_candidates = [0.5, 0.6, 0.7, 0.8, 0.953, 1.2, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0]
+    if far_cell_candidates is None:
+        far_cell_candidates = [1, 1.5, 2, 3, 4, 5, 7, 10, 15, 20, 30, 45, 60, 71.44]
+
+    onset_frames = [f for f in onset_frames if f is not None]
+
+    def is_pure(states, onset_frame):
+        for s in states:
+            if s.start_frame <= onset_frame <= s.end_frame:
+                return s.start_frame == onset_frame
+        return False
+
+    best_combo, best_n = (None, None), None
+    for near_cell in near_cell_candidates:
+        for far_cell in far_cell_candidates:
+            states = compress_to_grid_states_variable_hysteresis(
+                rxs, rys, near_cell, far_cell, near_range, gy, margin_ratio=margin_ratio,
+            )
+            if all(is_pure(states, f) for f in onset_frames):
+                n = len(states)
+                if best_n is None or n < best_n:
+                    best_n, best_combo = n, (near_cell, far_cell)
+
+    if best_n is None:
+        return None, None, None
+    return best_combo[0], best_combo[1], best_n
+
+
 def auto_grid_params_from_ajisai(json_path: str, npc_name: Optional[str] = None, **kwargs) -> AutoGridParams:
     """AJISAIログのJSONファイルから車両サイズを読み取り、自動的に格子パラメータを導出する。
 

@@ -1018,4 +1018,22 @@ d_min = [v_r・ρ + (1/2)・a_max,accel・ρ² + (v_r + ρ・a_max,accel)²/(2�
 
 実装は`logverify/rss_model.py`（新規）、`logverify/auto_grid.py`（`auto_near_range_from_risk_frame`・`auto_grid_params_naive_uniform`を追加）、`logverify/compare_safety_model_abstractions.py`（新規）、`logverify/plot_safety_model_abstraction_comparison.py`（新規）。図は`out_gif/safety_model_abstraction_comparison.png`。
 
+**追記: near_cell/far_cellも安全性モデルに合わせて調整すると、箱数はさらに減らせるか。** ユーザーから「C&C基準・RSS基準の格子は、near/farの粒度を変えれば箱数を減らせるのではないか」との指摘があった。上記(2)(3)は、near_rangeだけを安全性モデルのonsetフレームから導出し、near_cell(0.953m)・far_cell(71.44m)は車両物理サイズ由来の値をそのまま流用していた——これは「near_rangeを安全性モデルに合わせる」という着想を実装する上で最小限の変更にとどめただけであり、near_cell/far_cellまで独立に調整してよい理由はなかった。この指摘を検証するため、`auto_grid.search_minimal_purity_grid`（新規）を実装し、near_cell・far_cellの候補（それぞれ12〜14通り）を総当たりして、指定したonsetフレーム(群)に対してpureなまま箱数最小になる組み合わせを探索した。
+
+結果、(2')C&C基準でnear_cell=3.0m・far_cell=60.0mとすると、C&C onsetに対して完全にpureなまま**箱数は91→40**まで減った（元の車両物理サイズ基準(1)の45箱すら下回る）。(3')RSS基準でnear_cell=2.0m・far_cell=60.0mとすると、RSS onsetに対して完全にpureなまま**箱数は119→64**まで減った。ユーザーの指摘は正しく、near_rangeだけでなくnear_cell/far_cellも独立に調整することで、purityを犠牲にせずに箱数を大きく減らせることが確認できた。
+
+ただし2つの重要な限界も見つかった。(a) **purityはセルサイズに対して滑らかではない。** (2')でnear_cellを0.953→2.0→3.0mと粗くしていく途中、near_cell=2.0mでは逆に大きくimpureになり(smear量が跳ね上がる)、3.0mで再びpureに戻るという非単調な挙動が見られた。これは、ヒステリシスで圧縮された箱の境界が、たまたまonsetフレームの位置と一致するかどうかという、離散的で不安定な現象であるためである。すなわち「もっと粗いセルでもたまたまpureになる」ケースがあり得るということであり、`search_minimal_purity_grid`が返す最小箱数の組み合わせは、この1本のログのこの1フレームに対する過学習のリスクを伴う——他のログでも同じ組み合わせがpureであり続ける保証はない。(b) **C&CとRSS両方に対して同時にpureにするのは、大幅に高くつく。** near_range=RSSのonset距離(38.77m)を使った候補集合の探索では両方に対してpureな組み合わせが見つからず、near_range=C&Cのonset距離(25.64m)まで縮めてfar_cell=2.0mまで細かくすることで、ようやく(5)near_cell=0.5m・far_cell=2.0mの組み合わせで両方pureを達成できたが、箱数は270個——(2')(3')の単一モデル最適化版の4〜7倍に達した。これは、RSS onset(rx≈32.3m)がC&C基準の近傍領域の外側（本来なら粗い遠方領域）に位置しているため、そこまで細かい解像度を保つには、near_rangeの外側全体を細かくせざるを得ないという、near/far二段階格子というスキーム自体の構造的な限界を示している——3段階以上の適応的な格子（onsetの近くだけを局所的に細分化するCEGARスタイルの精密化）であれば、より少ない箱数で両方のpurityを達成できる可能性があり、今後の課題である。
+
+更新後の比較（図・実装済み）:
+
+| 格子 | near_cell(m) | far_cell(m) | near_range(m) | 箱数 | purity(C&C) | purity(RSS) |
+|---|---|---|---|---|---|---|
+| (2) C&C基準（near_rangeのみ調整） | 0.953 | 71.44 | 25.64 | 91 | IMPURE(0.55m) | IMPURE(35.8m) |
+| (2') C&C基準+粒度最適化 | 3.0 | 60.0 | 25.64 | **40** | **PURE** | IMPURE(29.9m) |
+| (3) RSS基準（near_rangeのみ調整） | 0.953 | 71.44 | 38.77 | 119 | IMPURE(0.55m) | IMPURE(0.81m) |
+| (3') RSS基準+粒度最適化 | 2.0 | 60.0 | 38.77 | **64** | IMPURE(1.65m) | **PURE** |
+| (5) 両モデルでpure+粒度最適化 | 0.5 | 2.0 | 25.64 | **270** | **PURE** | **PURE** |
+
+実装は`logverify/auto_grid.py`（`search_minimal_purity_grid`を追加）、`logverify/compare_safety_model_abstractions.py`（(2')(3')(5)の変種を追加）。図は更新済みの`out_gif/safety_model_abstraction_comparison.png`。
+
 

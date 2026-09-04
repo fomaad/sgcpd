@@ -57,7 +57,7 @@ from logverify.jama_cc_model import find_risk_perceived_frame
 from logverify.rss_model import npc_speed_series, find_rss_risk_frame
 from logverify.auto_grid import (
     auto_grid_params_from_ajisai, auto_grid_params, auto_near_range_from_risk_frame,
-    auto_grid_params_naive_uniform, AutoGridParams,
+    auto_grid_params_naive_uniform, search_minimal_purity_grid, AutoGridParams,
 )
 from logverify.grid_bridge import compress_to_grid_states_variable_hysteresis
 from logverify.multi_log_model import build_single_log_model_hysteresis
@@ -167,6 +167,37 @@ def run():
         ("rss", "(3) RSSモデル基準", rss_grid),
         ("baseline_uniform", "(4) 一様格子（ベースライン）", baseline_grid),
     ]
+
+    # --- 12.25節への追記: near_cell/far_cellも独立に最適化する ---
+    # ユーザーからの指摘「near/farの粒度を変えれば箱数は減らせるのでは」
+    # に応え、near_rangeは(2)(3)と同じまま、near_cell/far_cellを総当たり
+    # 探索して、(a) 自分自身のonsetに対してpureなまま箱数最小の組み合わせ、
+    # (b) C&C・RSS両方のonsetに対してpureなまま箱数最小の組み合わせ、
+    # を追加で求める。
+    cc_nc, cc_fc, cc_n = search_minimal_purity_grid(rxs, rys, geometry_grid.gy, cc_grid.rx_near_range, [cc_risk_frame])
+    rss_nc, rss_fc, rss_n = search_minimal_purity_grid(rxs, rys, geometry_grid.gy, rss_grid.rx_near_range, [rss_risk_frame])
+    # near_range=RSSのonset距離(より遠い方)で試して見つからなければ、
+    # near_range=C&Cのonset距離(近い方)でも試す(12.25節への追記の実験で、
+    # near_rangeが遠い方だと逆にfar_cellを極端に細かくする必要が生じ、
+    # 候補集合内で見つからないことがあると分かったため)。
+    both_nc, both_fc, both_n = search_minimal_purity_grid(
+        rxs, rys, geometry_grid.gy, rss_grid.rx_near_range, [cc_risk_frame, rss_risk_frame]
+    )
+    both_near_range = rss_grid.rx_near_range
+    if both_n is None:
+        both_nc, both_fc, both_n = search_minimal_purity_grid(
+            rxs, rys, geometry_grid.gy, cc_grid.rx_near_range, [cc_risk_frame, rss_risk_frame]
+        )
+        both_near_range = cc_grid.rx_near_range
+    if cc_n is not None:
+        variants.append(("jama_cc_optimized", "(2') C&C基準+粒度最適化",
+                          AutoGridParams(gy=geometry_grid.gy, rx_near_cell=cc_nc, rx_near_range=cc_grid.rx_near_range, rx_far_cell=cc_fc)))
+    if rss_n is not None:
+        variants.append(("rss_optimized", "(3') RSS基準+粒度最適化",
+                          AutoGridParams(gy=geometry_grid.gy, rx_near_cell=rss_nc, rx_near_range=rss_grid.rx_near_range, rx_far_cell=rss_fc)))
+    if both_n is not None:
+        variants.append(("both_optimized", "(5) 両モデルでpure+粒度最適化",
+                          AutoGridParams(gy=geometry_grid.gy, rx_near_cell=both_nc, rx_near_range=both_near_range, rx_far_cell=both_fc)))
 
     results: List[VariantResult] = []
     for name, label_ja, grid in variants:
