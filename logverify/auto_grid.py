@@ -149,6 +149,72 @@ def auto_grid_params(
     return AutoGridParams(gy=gy, rx_near_cell=near_cell, rx_near_range=near_range, rx_far_cell=far_cell)
 
 
+def auto_near_range_from_risk_frame(
+    rxs, risk_frame: Optional[int], margin_factor: float = 1.2, default: float = 15.0
+) -> float:
+    """12.25節: 「安全性判定モデル(safety model)が実際にリスクを気にし
+    始めるフレーム」(risk_frame -- JAMA C&Cのrisk-perceived frameでも、
+    RSSのviolation frameでも、どちらでも渡せる)から、near_rangeを
+    機械的に決める。
+
+    これまでの`auto_near_range`(車両物理サイズ×factor)は「接触しうる
+    範囲」という車両ジオメトリだけに基づいており、どの安全性モデルを
+    採用するかとは無関係だった。本関数は代わりに、risk_frameでの
+    |rx|の値そのもの(にmargin_factor倍の余裕を持たせた値)をnear_rangeに
+    採用することで、「その安全性モデルが実際に注意を払う範囲を、
+    格子もちょうど覆うように細かくする」という、文字通りの
+    safety-model-guided abstraction を実現する。risk_frameが見つからない
+    場合(その安全性モデルの基準では一度もリスクが検出されなかった場合)は
+    `default`を使う。
+
+    ---
+    English: Section 12.25. Derives near_range mechanically from "the
+    frame at which the safety model actually starts to care about risk"
+    (risk_frame -- this can be either JAMA C&C's risk-perceived frame or
+    RSS's violation frame). The earlier `auto_near_range` (vehicle
+    physical size x factor) was based purely on vehicle geometry and had
+    nothing to do with which safety model was in use. This function
+    instead takes the value of |rx| at risk_frame itself (with a
+    margin_factor safety margin) as near_range, so that the grid is made
+    fine exactly over the region the safety model actually attends to --
+    a literal instance of safety-model-guided abstraction. If no
+    risk_frame was found (the safety model never flagged risk under its
+    own criterion), `default` is used.
+    """
+    if risk_frame is None or rxs[risk_frame] is None:
+        return default
+    return margin_factor * abs(rxs[risk_frame])
+
+
+def auto_grid_params_naive_uniform(
+    rx_extent: float, cell_width: float = 2.0, gy: float = 0.3
+) -> AutoGridParams:
+    """12.25節: ベースライン用の、素朴な一様格子。近傍/遠方の区別を
+    一切設けず、`rx_extent`（観測されたrxの絶対値の最大程度）全体を
+    `cell_width`一定のセルで覆う(near_range=rx_extentとして、
+    near_cell=far_cell=cell_widthにすることで実現する)。
+
+    「何も特徴を考えずに、適当な幅のグリッドで抽象化する」という
+    ユーザー提案のベースラインをそのまま実装したもの。cell_widthの
+    デフォルト2.0mは、車両物理サイズにもいずれの安全性モデルにも
+    由来しない、恣意的な値である(ベースラインとしてそうであることが
+    重要)。
+
+    ---
+    English: Section 12.25. A naive baseline: a uniform grid with no
+    near/far distinction at all, covering the whole observed rx extent
+    with a constant `cell_width` (implemented by setting
+    near_range=rx_extent and near_cell=far_cell=cell_width).
+
+    This directly implements the user's proposed baseline: "abstract with
+    a grid of some arbitrary width, without considering any features at
+    all". The default cell_width of 2.0m is deliberately arbitrary --
+    derived from neither vehicle geometry nor any safety model (which is
+    the point of a baseline).
+    """
+    return AutoGridParams(gy=gy, rx_near_cell=cell_width, rx_near_range=rx_extent, rx_far_cell=cell_width)
+
+
 def auto_grid_params_from_ajisai(json_path: str, npc_name: Optional[str] = None, **kwargs) -> AutoGridParams:
     """AJISAIログのJSONファイルから車両サイズを読み取り、自動的に格子パラメータを導出する。
 
