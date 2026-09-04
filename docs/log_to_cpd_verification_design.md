@@ -864,3 +864,15 @@ a_IDM = a_max・(1 - (v/v0)^δ - (s*/s)^2)
 実装は`logverify/jama_cc_model.py`（`cc_deceleration_at`, `find_risk_perceived_frame`, `simulate_cc_reference`、`python3 -m logverify.jama_cc_model`）。図は`out_gif/jama_cc_model_comparison.png`。
 
 参考文献: 日本自動車工業会(JAMA), "Automated Driving Safety Evaluation Framework" Ver.2.0, Section 2.3.3.1 "Competent and Careful Human Driver Model", https://www.jama.or.jp/english/reports/docs/Automated_Driving_Safety_Evaluation_Framework_Ver2.0.pdf
+
+### 12.20 抽象化後のモデルをCPD箱列として可視化（v0.20）
+
+ユーザーから「抽象化した後のログ，つまり，モデルが気になるので，そちらを可視化してください」との依頼があった。12.19節はTTCの時系列グラフと反実仮想の縦距離グラフという形で結果を示したが、これは12.13節の「実時間スイムレーン」に近い形式であり、12.14節で確立した「CPDの箱列そのものを描く」スナップショット列形式ではなかった。本節は、12.18/12.19節の抽象値を12.14節の形式に統合し、「抽象化後のモデル」を直接可視化する。
+
+**拡張内容。** 12.14節の`ScenarioSnapshot`データクラスに、`ttc_label`（12.18節のTTCゾーン）と`rx_cc_ref`（12.19節のJAMA C&Cモデルの反実仮想における、その箱の代表時刻でのNPCとの縦方向距離）の2フィールドを追加した。`plot_scenario_snapshot_sequence`側では、`rx_cc_ref`が与えられている箱について、実際のNPC矩形と同じ横位置(dy0)・同じ大きさで、**青い破線のゴースト矩形**を反実仮想の縦位置(dx0)に重ねて描く。ラベル欄には、TTCラベルを最上段に追加した（12.12/12.15節の減速・予測・余裕ラベルは従来通り併記）。
+
+**結果。** ログ0067にこの拡張版を適用したところ(`out_gif/jama_cc_scenario_snapshots.png`)、risk知覚後の各箱で、実際のNPC矩形（オレンジ、衝突箱では赤）とゴースト矩形（青破線）が時間とともにどんどん離れていく様子が直接視覚化された——箱#7(t=-1.18s)ではdx0の差はまだ小さいが、衝突箱#15(t=+2.19s、余裕ラベル「接触」・NPC矩形が赤)では、実際のNPCがEgoに重なって描かれる一方、ゴースト矩形は約50m先まで離れている。これは「抽象化した後のモデル」——実際の挙動と、JAMA公式基準による安全な反実仮想との乖離——を、1つの図の上で直接読み取れる形にしたものである。
+
+**副次的な発見。** TTCラベルは、危険な接近中(box#7〜#13)は一貫して"danger"を示すが、衝突が実際に起きた箱#15以降では"safe"に戻ってしまう。これはTTCの定義（縦方向の残り距離÷接近速度）が「まだ接触していない、かつ接近中」の場合にしか意味を持たず、接触・すれ違い後は「もう近づいていない」ため機械的に安全側に分類されてしまうという、12.18節でも触れた性質である。CPD箱列という形式で可視化したことで、この「TTCは事後には無力である」という限界が、時系列グラフで見るよりもさらに直接的に（衝突箱のすぐ隣で"safe"ラベルが表示されるという形で）確認できた。
+
+実装は`logverify/scenario_snapshot_diagram.py`（`ScenarioSnapshot.ttc_label`, `ScenarioSnapshot.rx_cc_ref`フィールドの追加、ゴースト矩形描画）と`logverify/demo_jama_cc_snapshot.py`（`python3 -m logverify.demo_jama_cc_snapshot`）。図は`out_gif/jama_cc_scenario_snapshots.png`。

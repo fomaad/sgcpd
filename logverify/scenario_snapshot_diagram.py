@@ -70,6 +70,13 @@ from logverify.abstract_cause_diagram import CONTACT_COLORS, DECEL_COLORS, PRED_
 matplotlib.rcParams["font.sans-serif"] = ["Noto Sans CJK JP", "Noto Sans CJK SC", "DejaVu Sans"]
 matplotlib.rcParams["axes.unicode_minus"] = False
 
+# 12.18節のTTCゾーン抽象値の色（信号色）。
+TTC_COLORS = {
+    "safe": "#a5d6a7",
+    "caution": "#ffcc80",
+    "danger": "#ef9a9a",
+}
+
 
 @dataclass
 class ScenarioSnapshot:
@@ -91,6 +98,18 @@ class ScenarioSnapshot:
     contact_label: Optional[str] = None
     lane_k: Optional[int] = None
     pos_i: Optional[int] = None
+    # 12.18/12.19節: TTCによる抽象値、およびJAMA C&Cモデルの反実仮想
+    # （risk知覚後のカウンターファクチュアルなNPCとの縦方向距離）。
+    # どちらもNoneなら、そのラベル・ゴースト矩形は描かれない
+    # （12.14節までの図との後方互換）。
+    #
+    # English: Section 12.18/12.19's TTC-based abstract label, and the
+    # JAMA C&C model's counterfactual (the NPC's longitudinal distance
+    # under the reference driver, after risk is perceived). Either left
+    # None draws neither the label nor the ghost NPC box (backward
+    # compatible with the diagrams through Section 12.14).
+    ttc_label: Optional[str] = None
+    rx_cc_ref: Optional[float] = None
 
 
 def _draw_velocity_arrow(ax, x0, y0, dx, dy, color, label):
@@ -136,8 +155,9 @@ def plot_scenario_snapshot_sequence(
     n = len(snapshots)
     assert n > 0, "snapshots must be non-empty"
 
-    x_min = min(min(s.rx for s in snapshots) - npc_half_length, -ego_half_length) - 2.0
-    x_max = max(max(s.rx for s in snapshots) + npc_half_length, ego_half_length) + 2.0
+    all_rx = [s.rx for s in snapshots] + [s.rx_cc_ref for s in snapshots if s.rx_cc_ref is not None]
+    x_min = min(min(all_rx) - npc_half_length, -ego_half_length) - 2.0
+    x_max = max(max(all_rx) + npc_half_length, ego_half_length) + 2.0
     y_extent = max(max(abs(s.ry) for s in snapshots) + npc_half_width, ego_half_width) + 1.4
     y_min, y_max = -y_extent, y_extent
 
@@ -167,6 +187,17 @@ def plot_scenario_snapshot_sequence(
         )
         ax.add_patch(npc_rect)
         ax.text(s.rx, s.ry, "NPC", ha="center", va="center", fontsize=6.5, color="white", zorder=4)
+
+        # 12.19節: JAMA C&Cモデルの反実仮想における、その箱の代表フレーム
+        # でのNPC縦方向位置を、実際のNPC矩形に重ねて破線の「ゴースト」
+        # 矩形として描く（risk知覚前、あるいは反実仮想が未定義の箱では
+        # 描かない）。
+        if s.rx_cc_ref is not None:
+            ghost_rect = Rectangle(
+                (s.rx_cc_ref - npc_half_length, s.ry - npc_half_width), 2 * npc_half_length, 2 * npc_half_width,
+                facecolor="none", edgecolor="#1565c0", linewidth=1.1, linestyle="--", zorder=3.5,
+            )
+            ax.add_patch(ghost_rect)
 
         # Ve0: Ego's own forward speed
         _draw_velocity_arrow(ax, ego_half_length, ego_half_width * 0.55, s.ego_speed * speed_scale, 0,
@@ -215,11 +246,21 @@ def plot_scenario_snapshot_sequence(
         lax.set_xlim(0, 1)
         lax.set_ylim(0, 1)
         lax.axis("off")
-        _abstract_label_row(lax, 0.80, "減速", s.decel_label, DECEL_COLORS)
-        _abstract_label_row(lax, 0.47, "予測", s.pred_label, PRED_COLORS)
-        _abstract_label_row(lax, 0.14, "余裕", s.contact_label, CONTACT_COLORS)
+        has_ttc = s.ttc_label is not None
+        if has_ttc:
+            _abstract_label_row(lax, 0.85, "TTC", s.ttc_label, TTC_COLORS)
+            _abstract_label_row(lax, 0.60, "減速", s.decel_label, DECEL_COLORS)
+            _abstract_label_row(lax, 0.35, "予測", s.pred_label, PRED_COLORS)
+            _abstract_label_row(lax, 0.10, "余裕", s.contact_label, CONTACT_COLORS)
+        else:
+            _abstract_label_row(lax, 0.80, "減速", s.decel_label, DECEL_COLORS)
+            _abstract_label_row(lax, 0.47, "予測", s.pred_label, PRED_COLORS)
+            _abstract_label_row(lax, 0.14, "余裕", s.contact_label, CONTACT_COLORS)
 
     fig.suptitle(title or "Scenario snapshot sequence (= CPD box sequence)", fontsize=12)
+    if any(s.rx_cc_ref is not None for s in snapshots):
+        fig.text(0.5, 0.965, "青破線＝JAMA C&Cモデルの反実仮想NPC位置（12.19節）",
+                  ha="center", va="top", fontsize=8.5, color="#1565c0")
 
     # Draw a connecting arrow between adjacent panels (CPD transition), in figure coordinates.
     fig.canvas.draw()
