@@ -903,3 +903,19 @@ a_IDM = a_max・(1 - (v/v0)^δ - (s*/s)^2)
 **限界。** (1) TTCの削除は「図に表示しない」ことであり、JAMA C&Cモデル自身の判定ロジックからTTCを除去したわけではない——TTCが判定に使われている以上、TTC自体の妥当性（例えば2.0秒という閾値の根拠）についての疑問は引き続き残る。(2) 「対応するCPDモデル」は今回1本のログのみから構築しており、12.16/12.17節のような複数ログを統合した`gcpd.Model`（`build_union_model_near_far_grid`）とは異なるモデルである——後者と対応させたい場合は、スナップショット列側の格子と`build_union_model_near_far_grid`側の格子（近傍/遠方セルサイズ）を合わせる追加の設計が必要になる。
 
 実装は`logverify/scenario_snapshot_diagram.py`（`TTC_COLORS`・`ttc_label`の削除、`CC_GAP_COLORS`・ゴースト矩形の強調描画の追加）と`logverify/demo_jama_cc_snapshot.py`（`build_single_log_model_hysteresis` + `verify_logs_included` + `plot_model_with_ego_paper_style`による「対応するCPDモデル」の構築・出力、`python3 -m logverify.demo_jama_cc_snapshot`）。図は`out_gif/jama_cc_scenario_snapshots.png`（改訂版）と`out_gif/jama_cc_cpd_model.png`（新規）。
+
+### 12.22 CPDモデルの図もEGO/NPC相対位置がわかる形式で可視化（v0.22）
+
+12.21節(c)で追加した`plot_model_with_ego_paper_style`によるCPDモデル図（`out_gif/jama_cc_cpd_model.png`）は、レーンごとのスイムレーン上に箱を「順序」だけで並べる抽象的な状態遷移図であり、論文スタイル(Fig.2/Fig.4)を踏襲した見やすさはあるものの、各箱が実際にどのくらいの縦距離・車線オフセットを表しているかは読み取れない。ユーザーから「CPDモデルの図も箱列可視化のようにEGOとNPCの相対位置がわかるように，並べて可視化してもらえませんか？」との依頼があり、本節で対応した。
+
+**課題。** `gcpd.Model`自体は箱を`(lane, position)`という離散インデックスの組としてしか持たない。実座標(rx, ry)はモデル構築時の入力（`grid_bridge.compress_to_grid_states_variable_hysteresis`等）にしか使われず、モデル自身には残らない。したがって「モデルの図でEGO/NPCの相対位置を見せる」には、各箱の格子インデックスから「そのセルが代表する近似的な実座標」を逆算する必要がある。
+
+**実装。** `grid_bridge.py`に`grid_index_variable_center(idx, near_cell, far_cell, near_range)`を追加した。これは12.11節で導入した非一様格子のインデックス化関数`grid_index_variable`の近似逆写像であり、Egoから近い範囲(`|idx|`が`near_range`に対応する境界インデックス以内)では`idx * near_cell`を、遠い範囲では境界を基準に`far_cell`刻みで加算した値を返す（格子内での正確な位置は失われているため、あくまでセルの代表値であることに注意）。レーン方向は一様格子なので`k * gy`で単純に中心値が求まる。
+
+この逆写像を使い、`demo_jama_cc_snapshot.py`に、CPDモデルの箱列(`mlm.sequences[0]`、12.20/12.21節のスナップショット列と同じ順序・同じ箱列)の各箱について、実座標の代わりに「その箱の格子インデックスが表す代表位置」を計算し、`scenario_snapshot_diagram.plot_scenario_snapshot_sequence`——12.14節以来使ってきた、EGO/NPCの矩形・dx0/dy0の寸法線を描く**全く同じ**パネル形式の関数——にそのまま渡して可視化するようにした。速度・分類ラベル（12.12/12.15節の減速・予測・余裕、12.19節のC&C差）はモデル自体には存在しない情報なので描かない。また、時刻はモデルに存在しない情報なので`show_time=False`という新しいオプションを`plot_scenario_snapshot_sequence`に追加し、パネルのタイトルから時刻表示を省いた。
+
+**結果。** ログ0067の表示範囲内の16箱について生成した図(`out_gif/jama_cc_cpd_model_positions.png`)では、box#3(k=-8,i=15)からbox#18(k=-4,i=7)まで、NPCがEgoに近づき（縦距離が縮み）、その後追い越して離れていく様子と、lane(k)が-8から-4へと変化していく様子（横方向の合流動作に対応）が、12.20/12.21節のスナップショット列と全く同じ見た目のパネル列として直接視覚化された。12.20/12.21節の図（実測値ベース、連続的に変化するdx0/dy0）と本節の図（モデルベース、格子にスナップした離散的なdx0/dy0）を並べて見比べることで、「モデルが実際の軌道をどの粒度で量子化して覚えているか」も確認できる。
+
+**限界。** (1) 格子インデックスからの逆算は近似であり、特に遠方セル(`rx_far_cell`が粗い領域)では、同じ箱に対応する実際の座標には幅があることに注意が必要（本図が示すのはあくまで代表値）。(2) 本節の図は、モデル構築に使った1本のログの箱列(`mlm.sequences[0]`)をそのままなぞって描いているため、複数ログを統合した`gcpd.Model`や、分岐・合流を含むモデルをこの形式で描く場合は、箱列ではなく「モデルから列挙されるシナリオ（`enumerate_scenarios`）」ごとに描く、またはグラフとして分岐を表現する、といった拡張が別途必要になる。
+
+実装は`logverify/grid_bridge.py`（`grid_index_variable_center`の追加）、`logverify/scenario_snapshot_diagram.py`（`plot_scenario_snapshot_sequence`に`show_time`オプションを追加）、`logverify/demo_jama_cc_snapshot.py`（`python3 -m logverify.demo_jama_cc_snapshot`）。図は`out_gif/jama_cc_cpd_model_positions.png`（新規）。

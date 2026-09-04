@@ -167,6 +167,7 @@ def plot_scenario_snapshot_sequence(
     speed_scale: float = 0.55,
     panel_w_in: float = 3.0,
     panel_h_in: float = 3.0,
+    show_time: bool = True,
 ) -> str:
     """CPDの箱列(`snapshots`, 箱の順に並んでいること)を、1箱=1パネルの
     横並びスナップショット列として描画する。
@@ -284,11 +285,14 @@ def plot_scenario_snapshot_sequence(
         for spine in ax.spines.values():
             spine.set_visible(False)
 
-        t_label = f"t={s.t - t_ref:+.2f}s" if t_ref is not None else f"t={s.t:.2f}s"
         box_label = f"box #{s.box_index}"
         if s.lane_k is not None and s.pos_i is not None:
             box_label += f" (k={s.lane_k},i={s.pos_i})"
-        ax.set_title(f"{box_label}\n{t_label}", fontsize=7.5)
+        if show_time:
+            t_label = f"t={s.t - t_ref:+.2f}s" if t_ref is not None else f"t={s.t:.2f}s"
+            ax.set_title(f"{box_label}\n{t_label}", fontsize=7.5)
+        else:
+            ax.set_title(box_label, fontsize=7.5)
 
     for lax, s in zip(label_axes, snapshots):
         lax.set_xlim(0, 1)

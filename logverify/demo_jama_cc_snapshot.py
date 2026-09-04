@@ -69,6 +69,7 @@ from logverify.demo_scenario_snapshot import (
 )
 from logverify.grid_bridge import (
     compress_to_grid_states_variable_hysteresis,
+    grid_index_variable_center,
     relative_xy_from_ajisai_groundtruth,
 )
 from logverify.jama_cc_model import find_risk_perceived_frame, simulate_cc_reference
@@ -80,6 +81,7 @@ from logverify.scenario_snapshot_diagram import ScenarioSnapshot, plot_scenario_
 DEFAULT_LOG_PATH = "/mnt/user-data/uploads/Downloads/TD-NI-AR-SD-N04-CI-0067.json"
 OUT_PATH = "out_gif/jama_cc_scenario_snapshots.png"
 MODEL_OUT_PATH = "out_gif/jama_cc_cpd_model.png"
+MODEL_POSITIONS_OUT_PATH = "out_gif/jama_cc_cpd_model_positions.png"
 
 
 def run(json_path: str) -> None:
@@ -181,6 +183,74 @@ def run(json_path: str) -> None:
         title="TD-NI-AR-SD-N04-CI-0067: 対応するgcpd.Model（スナップショット列と同一の箱列）",
     )
     print(f"CPDモデル図を書き出しました: {model_path}")
+
+    # 12.22節: 「CPDモデルの図も箱列可視化のようにEGOとNPCの相対位置が
+    # わかるように、並べて可視化してほしい」との依頼。上のplot_model_
+    # with_ego_paper_style は、箱をレーンごとのスイムレーン上に「順序」
+    # だけで並べる抽象的な状態遷移図であり、各箱が実際にどのくらいの
+    # 距離・車線オフセットを表すかは読み取れない。
+    #
+    # gcpd.Model自体は箱を(lane,position)という離散インデックスの組
+    # としてしか持たない（実座標はモデル構築時の入力にしか使われず、
+    # モデルには残らない）ため、grid_index_variable_centerで各箱の
+    # 格子インデックスから近似的な実座標（そのセルの代表位置）を逆算し、
+    # scenario_snapshot_diagramと全く同じ「EGO/NPC位置関係パネル」形式
+    # で、箱をモデルの箱列と同じ順序に並べて描く。
+    # 上のスナップショット列（実測値）と対で見ることで、「実際の軌道」と
+    # 「モデルが量子化して覚えている代表位置」の違いも確認できる。
+    #
+    # English: Section 12.22 -- the user asked that "the CPD model
+    # diagram should also be laid out like the box-sequence
+    # visualization, so the EGO/NPC relative position is visible."
+    # plot_model_with_ego_paper_style above is an abstract state-
+    # transition diagram that places boxes on per-lane swimlanes purely
+    # by order -- it does not convey how much distance or lane offset
+    # each box actually represents.
+    #
+    # A gcpd.Model itself only holds boxes as discrete (lane, position)
+    # index pairs (the real coordinates are used only as input when
+    # building the model and are not retained by the model itself), so
+    # grid_index_variable_center is used to invert each box's grid
+    # index back into an approximate real-world coordinate (a
+    # representative position for that cell), and the boxes are drawn
+    # in the model's own box-sequence order using exactly the same
+    # "EGO/NPC positional relation panel" format as
+    # scenario_snapshot_diagram. Comparing this against the snapshot
+    # sequence above (built from the actual measured trajectory) also
+    # shows the difference between "the actual trajectory" and "the
+    # representative position the model quantizes it to."
+    print("=== 対応するCPDモデルを、箱列可視化と同じ位置関係パネル形式で可視化 ===")
+    # 上のスナップショット列と同じ表示範囲（sub_states, 表示ウィンドウ内の
+    # 箱だけ）に絞る。mlm.sequences[0]はstatesと同じ順序・同じ箱列なので、
+    # sub_statesのindexでそのまま絞り込める（全45箱を1枚に並べると
+    # 横に長大になりすぎるため）。
+    #
+    # English: Restrict to the same display window as the snapshot
+    # sequence above (sub_states, the boxes within the display window).
+    # mlm.sequences[0] is in the same order as states, so it can be
+    # filtered directly using sub_states' indices (drawing all 45 boxes
+    # on one figure would make it unmanageably wide).
+    sub_indices = {s.index for s in sub_states}
+    model_snapshots = []
+    for idx, key in enumerate(mlm.sequences[0]):
+        if idx not in sub_indices:
+            continue
+        lane_k, pos_i = key
+        box_id = mlm.box_id_of[key]
+        rx_c = grid_index_variable_center(pos_i, auto.rx_near_cell, auto.rx_far_cell, auto.rx_near_range)
+        ry_c = lane_k * auto.gy
+        model_snapshots.append(ScenarioSnapshot(
+            box_index=box_id, t=0.0, rx=rx_c, ry=ry_c,
+            ego_speed=0.0, npc_speed=0.0, npc_lateral_speed=0.0,
+            lane_k=lane_k, pos_i=pos_i,
+        ))
+    model_pos_path = plot_scenario_snapshot_sequence(
+        model_snapshots, MODEL_POSITIONS_OUT_PATH,
+        ego_half_length=eh_l, ego_half_width=eh_w, npc_half_length=nh_l, npc_half_width=nh_w,
+        title="TD-NI-AR-SD-N04-CI-0067: 対応するgcpd.Model（箱ごとの代表位置、EGO/NPC相対位置版）",
+        show_time=False,
+    )
+    print(f"CPDモデル位置関係図を書き出しました: {model_pos_path}")
 
 
 if __name__ == "__main__":

@@ -146,6 +146,42 @@ def grid_index_variable(value: float, near_cell: float, far_cell: float, near_ra
     return boundary_idx + sign * grid_index_centered(abs(remainder), far_cell)
 
 
+def grid_index_variable_center(idx: int, near_cell: float, far_cell: float, near_range: float) -> float:
+    """grid_index_variable の近似逆写像。与えられた格子インデックスに
+    対応するセルの代表値（中心付近の値）を、可視化用に返す。
+
+    12.22節: gcpd.Model は箱を (lane, position) という離散インデックスの
+    組でしか持たない（実際の連続値rx/ryは、モデル構築の入力にしか使われず
+    モデル自身には残らない）。「CPDモデルの図もEGO/NPCの相対位置が
+    わかるように」というユーザーの依頼に応えるには、各箱のインデックスから
+    「その箱が表す近似的な実座標」を逆算する必要がある——本関数はその
+    ための、可視化専用の近似逆写像である（格子内での正確な位置は失われて
+    いるため、あくまで代表値であることに注意）。
+
+    ---
+    English:
+    Approximate inverse of grid_index_variable. Returns a representative
+    (near-center) value for the cell corresponding to the given grid
+    index, for visualization purposes.
+
+    Section 12.22: a gcpd.Model only holds boxes as discrete (lane,
+    position) index pairs -- the actual continuous rx/ry values are used
+    only as input to building the model and are not retained by the
+    model itself. To satisfy the user's request that "the CPD model
+    diagram should also show the EGO/NPC relative position," each box's
+    index must be inverted back into an approximate real-world
+    coordinate -- this function does that, for visualization only (the
+    exact position within the cell is lost, so this is only a
+    representative value).
+    """
+    boundary_idx = grid_index_centered(near_range, near_cell)
+    if abs(idx) <= boundary_idx:
+        return idx * near_cell
+    sign = 1 if idx > 0 else -1
+    remainder_idx = abs(idx) - boundary_idx
+    return sign * (near_range + remainder_idx * far_cell)
+
+
 def to_grid_indices_variable(
     rx: Optional[float],
     ry: Optional[float],
