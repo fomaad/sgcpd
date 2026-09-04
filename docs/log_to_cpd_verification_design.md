@@ -1036,4 +1036,25 @@ d_min = [v_r・ρ + (1/2)・a_max,accel・ρ² + (v_r + ρ・a_max,accel)²/(2�
 
 実装は`logverify/auto_grid.py`（`search_minimal_purity_grid`を追加）、`logverify/compare_safety_model_abstractions.py`（(2')(3')(5)の変種を追加）。図は更新済みの`out_gif/safety_model_abstraction_comparison.png`。
 
+**再訂正: 「near/far」は計量格子の粒度の話ではなかった（`logverify/safety_predicate_abstraction.py`、新規）。** ユーザーから、上記の実験全体に関わる2つの根本的な指摘があった。
+
+(1) 「車両物理サイズ基準」というラベルは分かりにくい——車両自身の物理サイズを基準にするなら、near/farで異なるセルサイズを使う理由がない。実際、`auto_grid_params_from_ajisai`の`near_range=物理サイズ×3`・`far_cell=near_rangeの×5`という係数は、車両サイズそのものから出てくるものではなく、その上に乗せた別の設計判断だった。徹底するなら、車両サイズ由来の1つのセルサイズ(0.9526m)を全域に一様に使うべきであり、これは「一様格子」ファミリーの特殊ケースに過ぎない（試したところ、この一様版は320run/箱——near/far版の45箱よりむしろ多くなった）。
+
+(2) 「near/far」の本来の意図は、距離に応じてセルサイズを変える計量格子ではなく、(a) 近傍は**安全性モデル自身の状態変数**（C&Cなら「risk知覚フレームの前後」「接触の有無」）で区切り、(b) 遠方（安全性モデルが注意を払わない範囲）は位置によらず**文字通り単一の箱**にまとめる、という述語的な抽象化(predicate abstraction)だった。
+
+さらに実装上の見落としも判明した: `gcpd.Model`の箱の同一性は`(lane, position)`の離散indexペアであり、`multi_log_model._model_from_sequences`は同じindexペアへの再訪問を自動的に同じ箱として扱う。したがって、これまで報告していた「箱数」(`len(states)`)は、実際には連続して同じ箱に留まる区間の数(run数)であり、`gcpd.Model`が実際に持つ相異なる箱の数(`len(box_id_of)`)とは異なる。
+
+`safety_predicate_abstraction.py`で、正しい意味での述語抽象化を実装した——各フレームを、(a) 2Dリスク値<1なら`CONTACT`、(b) `|rx|>near_rx(40m)`なら位置によらず単一の`FAR`、(c) それ以外は`(状態, lane_k)`（C&Cなら`risk_frame`以降か否かで`RISK`/`SAFE`、RSSなら`VIOLATION`/`SAFE`）、というラベルに変換し、ラベルが初出のときだけ新しい箱idを割り当て、以降の再訪問は既存のidを再利用する。ログ0067での結果:
+
+| 抽象化 | 真の箱数(distinct) | run数 | purity(自分自身のonset) | purity(もう一方のonset) |
+|---|---|---|---|---|
+| C&C述語抽象化 | **13** | 16 | PURE（構造上必然） | IMPURE(28フレーム分混在) |
+| RSS述語抽象化 | **13** | 16 | PURE（構造上必然） | IMPURE(40フレーム分混在) |
+
+真の箱数はわずか13個——これまで試したどの計量格子版（40〜270箱）よりも大幅に少ない。しかも自分自身のonsetに対するpurityは、セルサイズをたまたま調整して得られる幸運な一致ではなく、ラベルの定義そのものによって**構造上必然的に**成り立つ（risk_frameちょうどでラベルが切り替わるように定義しているため）。ただし、もう一方の安全性モデルのonsetに対してはやはりimpureのままであり、「あるsafety modelで純粋な抽象化が、別のsafety modelでも純粋である保証はない」という12.25節の中心的な知見は、計量格子版でも述語抽象化版でも変わらず成り立つ、頑健な結論であることが確認できた。
+
+なお、C&C述語抽象化の箱の内訳を見ると、`RISK`状態だけでlane_kが-8から1まで9通り出現しており、横方向の格子(gy)にヒステリシスを適用していないための細分化（カットイン中の実際の横移動か、測定ノイズによる境界またぎか、未判別）が原因と考えられる——横方向にも12.10節のヒステリシスを適用することが今後の課題である。
+
+実装は`logverify/safety_predicate_abstraction.py`（新規）。
+
 

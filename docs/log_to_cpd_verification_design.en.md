@@ -1037,3 +1037,24 @@ Updated comparison (figure and implementation updated accordingly):
 | (5) Jointly pure, tuned granularity | 0.5 | 2.0 | 25.64 | **270** | **PURE** | **PURE** |
 
 Implementation: `logverify/auto_grid.py` (added `search_minimal_purity_grid`), `logverify/compare_safety_model_abstractions.py` (added variants (2'), (3'), (5)). Figure: updated `out_gif/safety_model_abstraction_comparison.png`.
+
+**A further correction: "near/far" was never about metric grid granularity (`logverify/safety_predicate_abstraction.py`, new).** The user raised two fundamental corrections to the whole experiment above.
+
+(1) The label "vehicle physical size basis" is confusing -- if the vehicles' own physical size is the basis, there's no reason to use different cell sizes for near vs. far. Indeed, `auto_grid_params_from_ajisai`'s `near_range = physical size x 3` and `far_cell = near_range x 5` factors do not themselves come from vehicle size; they are separate design decisions layered on top. To be consistent, a single vehicle-size-derived cell size (0.9526m) should be used uniformly across the whole domain -- which is just a special case of the "uniform grid" family. (Tried this: it produces 320 runs/boxes -- actually more than the near/far version's 45.)
+
+(2) The real intent behind "near/far" was never a metric grid whose cell size varies with distance. It was predicate abstraction: (a) the near region is partitioned by the safety model's OWN state variables (for C&C: before/after the risk-perceived frame, in contact or not), and (b) the far region (where the safety model does not attend) is collapsed into literally a single box, regardless of position.
+
+A further implementation oversight also came to light: a `gcpd.Model`'s box identity is the discrete `(lane, position)` index pair, and `multi_log_model._model_from_sequences` automatically treats a revisit to the same index pair as the same box. So the "box counts" reported earlier (`len(states)`) actually counted the number of runs (maximal stretches spent continuously in the same box), not the number of distinct boxes (`len(box_id_of)`) the `gcpd.Model` actually has.
+
+`safety_predicate_abstraction.py` implements the correct predicate abstraction: each frame is labeled (a) `CONTACT` if the 2D risk value is below 1, (b) a single global `FAR` if `|rx| > near_rx (40m)`, regardless of position, or (c) `(state, lane_k)` otherwise (`RISK`/`SAFE` for C&C, based on whether the frame is at or after `risk_frame`; `VIOLATION`/`SAFE` for RSS); a new box id is assigned only the first time a label is seen, and later occurrences reuse it. Results on log 0067:
+
+| Abstraction | true (distinct) box count | # runs | purity (own onset) | purity (other model's onset) |
+|---|---|---|---|---|
+| C&C predicate abstraction | **13** | 16 | PURE (by construction) | IMPURE (28 frames mixed) |
+| RSS predicate abstraction | **13** | 16 | PURE (by construction) | IMPURE (40 frames mixed) |
+
+The true box count is only 13 -- far fewer than any of the metric-grid variants tried earlier (40-270). And purity at the model's own onset is not a lucky coincidence of cell-size tuning; it holds **by construction**, since the label is defined to switch exactly at `risk_frame`. However, purity at the other safety model's onset remains impure -- confirming that Section 12.25's central finding ("a grid pure for one safety model is not guaranteed to be pure for another") holds equally for the metric-grid version and the predicate-abstraction version; it is a robust conclusion, not an artifact of how the metric grid happened to be tuned.
+
+One thing worth flagging: within the C&C predicate abstraction, the `RISK` state alone appears with 9 distinct lane_k values (-8 through 1) -- likely over-fragmentation from applying no hysteresis to the lateral grid (whether this reflects genuine lateral motion during the cut-in or noise-driven boundary crossings is not yet determined). Applying Section 12.10's hysteresis to the lateral direction as well is left as future work.
+
+Implementation: `logverify/safety_predicate_abstraction.py` (new).
