@@ -1,6 +1,13 @@
 """12.25節の最終まとめ: (1)〜(5)の5つの抽象化それぞれについて、
 ログ0067での箱列（EGO/NPCの相対位置つき）を可視化する。
 
+12.23節の区別に従い、本モジュールは「シナリオ可視化」
+(transition_arrow_style="panel"、実測ログが実際に辿った時系列としての
+箱列、時刻つき)を使う——「CPD可視化」(transition_arrow_style="boxes"、
+EGO/NPC矩形どうしを直接結ぶCPDモデル自身の構造的な図、時刻なし)とは
+別物である。各箱の代表位置・代表時刻は、その箱に属する実測フレームの
+平均値を使う。
+
 ユーザーとの議論を経て確定した5つの比較対象（案A）:
   (1) 車両物理サイズ基準（一様格子の特殊系。cell=0.9526m、near/farの
       区別なし——「車両サイズを基準にするならnear/farを分ける理由が
@@ -167,8 +174,8 @@ def run():
         plot_scenario_snapshot_sequence(
             snapshots, out_path,
             ego_half_length=eh_l, ego_half_width=eh_w, npc_half_length=nh_l, npc_half_width=nh_w,
-            title=title, show_time=False, transition_arrow_style="boxes",
-            panel_w_in=1.6, panel_h_in=2.1,
+            title=title, show_time=True, transition_arrow_style="panel",
+            panel_w_in=1.6, panel_h_in=2.1, t_ref=timestamps[0],
         )
         print(f"{label}: 全箱数={total_boxes} 表示箱数={n_shown} -> {out_path}")
         paths.append(out_path)
