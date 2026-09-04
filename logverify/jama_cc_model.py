@@ -96,7 +96,48 @@ def cc_deceleration_at(t, t_risk):
     return CC_MAX_DECEL * (ramp_t / CC_TIME_TO_MAX_DECEL)
 
 
-def find_risk_perceived_frame(rxs, rys, ttcs, eh_w, nh_w, near_rx=40.0):
+def _first_persistent_trigger(n, predicate, persist_frames):
+    """`predicate(i)`が`persist_frames`フレーム連続で真になった、その
+    連続区間の最初のフレームを返す（見つからなければNone）。
+
+    12.24節: AJISAI cut-in全94本のうち5本を抜き出して分析したところ、
+    ログ0002で単発フレーム(471フレーム目)だけTTCが瞬間的に0.32秒まで
+    落ち込む（前後のフレームは7.6秒・5.0秒）ノイズが見つかり、これが
+    risk知覚フレームとして採用されてしまい、実際のカットイン（1063
+    フレーム目）より592フレームも早い、無関係な地点から表示ウィンドウが
+    始まってしまう不具合があった。相対速度の有限差分によるTTC計算は、
+    単一フレームのノイズに対して脆弱である——この関数は、12.10節の
+    ヒステリシス（格子状態の圧縮でノイズによる見せかけの分岐を吸収する
+    考え方）と同じ発想を、risk知覚判定に適用したもの。
+
+    ---
+    English:
+    Returns the first frame of the run in which `predicate(i)` holds for
+    `persist_frames` consecutive frames (None if no such run exists).
+
+    Section 12.24: analyzing 5 of the 94 AJISAI cut-in logs surfaced a
+    case (log 0002) where TTC dipped to 0.32s for a single frame (471)
+    -- pure noise, since the neighboring frames read 7.6s and 5.0s --
+    and that single frame was accepted as the risk-perceived frame,
+    starting the display window 592 frames before the actual cut-in
+    (frame 1063) at an unrelated point in the log. TTC, computed from a
+    finite difference of relative velocity, is fragile to single-frame
+    noise. This function applies the same idea as Section 12.10's
+    hysteresis (absorbing apparent branch points caused by noise when
+    compressing grid states) to the risk-perception decision.
+    """
+    run = 0
+    for i in range(n):
+        if predicate(i):
+            run += 1
+            if run >= persist_frames:
+                return i - persist_frames + 1
+        else:
+            run = 0
+    return None
+
+
+def find_risk_perceived_frame(rxs, rys, ttcs, eh_w, nh_w, near_rx=40.0, persist_frames=3):
     """横方向0.72m境界・縦方向TTC=2.0秒境界のいずれか早い方でリスクが
     知覚されるフレームを求める。
 
@@ -104,23 +145,38 @@ def find_risk_perceived_frame(rxs, rys, ttcs, eh_w, nh_w, near_rx=40.0):
     にいる場合でも、たまたま横位置が近い偶然の一致でヒットしてしまう
     ことがあるため、`compute_ttc`と同じ`near_rx`（縦方向近接判定の
     範囲）でも絞り込む。
+
+    persist_frames: 境界条件を満たすフレームが単発（測定ノイズ）ではなく
+    実際に持続していることを要求する（12.24節、`_first_persistent_trigger`
+    参照）。デフォルト3フレームで、実際のリスク知覚イベント（数十
+    フレーム以上持続する）を遅らせる影響はほぼ無視できる一方、単一
+    フレームのノイズによる誤トリガーを排除できる。
+
+    ---
+    English:
+    persist_frames: requires the boundary condition to actually persist,
+    rather than firing on a single noisy frame (Section 12.24, see
+    `_first_persistent_trigger`). The default of 3 frames has negligible
+    effect on genuine risk-perception events (which persist for tens of
+    frames or more), while filtering out single-frame noise triggers.
     """
     contact_half_w = eh_w + nh_w
-    lateral_frame = None
-    for i, ry in enumerate(rys):
+
+    def lateral_ok(i):
+        ry = rys[i]
         if ry is None:
-            continue
+            return False
         rx = rxs[i]
         if rx is None or abs(rx) > near_rx:
-            continue
-        if abs(ry) <= contact_half_w + CC_LATERAL_RISK_BOUNDARY:
-            lateral_frame = i
-            break
-    ttc_frame = None
-    for i, ttc in enumerate(ttcs):
-        if ttc is not None and ttc <= CC_TTC_RISK_BOUNDARY:
-            ttc_frame = i
-            break
+            return False
+        return abs(ry) <= contact_half_w + CC_LATERAL_RISK_BOUNDARY
+
+    def ttc_ok(i):
+        ttc = ttcs[i]
+        return ttc is not None and ttc <= CC_TTC_RISK_BOUNDARY
+
+    lateral_frame = _first_persistent_trigger(len(rys), lateral_ok, persist_frames)
+    ttc_frame = _first_persistent_trigger(len(ttcs), ttc_ok, persist_frames)
     candidates = [f for f in (lateral_frame, ttc_frame) if f is not None]
     if not candidates:
         return None, lateral_frame, ttc_frame
