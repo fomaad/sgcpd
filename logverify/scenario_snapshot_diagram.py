@@ -168,15 +168,46 @@ def plot_scenario_snapshot_sequence(
     panel_w_in: float = 3.0,
     panel_h_in: float = 3.0,
     show_time: bool = True,
+    transition_arrow_style: str = "panel",
 ) -> str:
     """CPDの箱列(`snapshots`, 箱の順に並んでいること)を、1箱=1パネルの
     横並びスナップショット列として描画する。
+
+    transition_arrow_style: 隣接パネル間の「箱遷移」矢印の描き方。
+    - "panel"（デフォルト、12.14〜12.22節までと同じ）: パネルとパネルの
+      間の空白に、各パネル中央の高さで1本の矢印を描く。実測ログ由来の
+      スナップショット列（このログ自身が辿った経路そのもの）を表示する
+      用途を想定しており、CPDモデルから列挙されうる「シナリオ」を後で
+      この上に重ねて示す拡張がしやすいよう、位置関係とは独立した単純な
+      「次に進む」という記号として描いている。
+    - "boxes"（12.23節で追加）: EGOを表す矩形どうし、NPCを表す矩形どうし
+      を、`ConnectionPatch`で直接結ぶ（色を分けて区別）。CPDモデルの
+      箱列（`gcpd.Model`のntrans）をそのまま可視化する用途を想定して
+      おり、矢印そのものがEGO/NPCそれぞれの実座標上の経路を直接なぞる。
 
     ---
     English:
     Draws a CPD box sequence (`snapshots`, assumed already in box order)
     as a horizontal sequence of snapshots, one panel per box.
+
+    transition_arrow_style: how the "box transition" arrow between
+    adjacent panels is drawn.
+    - "panel" (default, same as Sections 12.14-12.22): a single arrow
+      drawn in the empty space between panels, at each panel's
+      mid-height. Intended for the snapshot sequence built from an
+      actual measured log (the path this log itself followed); it is
+      drawn as a simple "advance to the next" symbol independent of
+      position, so that "scenarios" enumerable from the CPD model can
+      later be overlaid on top of it.
+    - "boxes" (added in Section 12.23): directly connects the
+      rectangles representing EGO to each other, and separately the
+      rectangles representing NPC to each other, via `ConnectionPatch`
+      (in different colors). Intended for visualizing a CPD model's own
+      box sequence (a gcpd.Model's ntrans) directly, where the arrow
+      itself traces EGO's and NPC's paths in real coordinates.
     """
+    if transition_arrow_style not in ("panel", "boxes"):
+        raise ValueError(f"transition_arrow_style must be 'panel' or 'boxes', got {transition_arrow_style!r}")
     n = len(snapshots)
     assert n > 0, "snapshots must be non-empty"
 
@@ -327,44 +358,82 @@ def plot_scenario_snapshot_sequence(
                   "「C&C差」＝有能で慎重な人間ドライバとの縦方向乖離量",
                   ha="center", va="top", fontsize=8.5, color="#0d47a1", fontweight="bold")
 
-    # 箱遷移(CPDのntrans)を表す矢印を、パネルとパネルの間の宙に引くのでは
-    # なく、EGOを表す矩形どうし・NPCを表す矩形どうしを直接結ぶ形で描く
-    # （ユーザーからの依頼: 「BOX遷移は，スナップショットではなくて，
-    # EGOを表現するボックスの間にひいてもらえますか．NPCに関しても同様
-    # です」）。ConnectionPatchはpatchA/patchBを指定すると、指定した
-    # パッチの境界で矢印を切り詰めてくれるため、パネル(axes)をまたいでも
-    # 矩形の縁から縁への矢印になる。EGO用とNPC用で色を変え、どちらの
-    # 遷移かが一目で分かるようにした。
+    # 箱遷移(CPDのntrans)を表す矢印の描き方は、用途に応じて2通りから選べる
+    # （12.23節、`transition_arrow_style`）。
     #
-    # English: Draw the arrows representing box transitions (CPD's
-    # ntrans) not as a generic line floating between panels, but
-    # directly connecting the rectangles that represent EGO to each
-    # other, and separately the rectangles that represent NPC to each
-    # other (per the user's request: "rather than between the
-    # snapshots, could you draw the box transition between the boxes
-    # representing EGO, and likewise for NPC"). ConnectionPatch, given
-    # patchA/patchB, clips the arrow at the given patch's boundary, so
-    # even across different panels (axes) the arrow runs edge-to-edge
-    # between the rectangles. EGO and NPC arrows use different colors
-    # so which transition is which is clear at a glance.
+    # ---
+    # English: The way box-transition arrows (CPD's ntrans) are drawn is
+    # selectable for the two intended use cases (Section 12.23,
+    # `transition_arrow_style`).
     fig.canvas.draw()
-    for i in range(n - 1):
-        ego_con = ConnectionPatch(
-            xyA=(0, 0), coordsA="data", axesA=axes[i],
-            xyB=(0, 0), coordsB="data", axesB=axes[i + 1],
-            patchA=ego_rects[i], patchB=ego_rects[i + 1],
-            arrowstyle="-|>", mutation_scale=11, color="#1565c0", linewidth=1.3, zorder=10,
-        )
-        fig.add_artist(ego_con)
+    if transition_arrow_style == "boxes":
+        # "boxes": パネルとパネルの間の宙に引くのではなく、EGOを表す矩形
+        # どうし・NPCを表す矩形どうしを直接結ぶ（ユーザーからの依頼:
+        # 「BOX遷移は，スナップショットではなくて，EGOを表現するボックス
+        # の間にひいてもらえますか．NPCに関しても同様です」）。
+        # ConnectionPatchはpatchA/patchBを指定すると、指定したパッチの
+        # 境界で矢印を切り詰めてくれるため、パネル(axes)をまたいでも
+        # 矩形の縁から縁への矢印になる。EGO用とNPC用で色を変え、どちらの
+        # 遷移かが一目で分かるようにした。CPDモデル自身の箱列
+        # （gcpd.Modelのntrans）を直接可視化する図（例:
+        # jama_cc_cpd_model_positions.png）向け。
+        #
+        # English: "boxes" -- instead of a line floating between panels,
+        # directly connect the rectangles representing EGO to each
+        # other, and separately the rectangles representing NPC to each
+        # other (per the user's request: "rather than between the
+        # snapshots, could you draw the box transition between the
+        # boxes representing EGO, and likewise for NPC"). ConnectionPatch,
+        # given patchA/patchB, clips the arrow at the given patch's
+        # boundary, so even across different panels (axes) the arrow
+        # runs edge-to-edge between the rectangles. EGO and NPC arrows
+        # use different colors so which transition is which is clear at
+        # a glance. Intended for figures that directly visualize a CPD
+        # model's own box sequence (a gcpd.Model's ntrans), e.g.
+        # jama_cc_cpd_model_positions.png.
+        for i in range(n - 1):
+            ego_con = ConnectionPatch(
+                xyA=(0, 0), coordsA="data", axesA=axes[i],
+                xyB=(0, 0), coordsB="data", axesB=axes[i + 1],
+                patchA=ego_rects[i], patchB=ego_rects[i + 1],
+                arrowstyle="-|>", mutation_scale=11, color="#1565c0", linewidth=1.3, zorder=10,
+            )
+            fig.add_artist(ego_con)
 
-        s_i, s_j = snapshots[i], snapshots[i + 1]
-        npc_con = ConnectionPatch(
-            xyA=(s_i.rx, s_i.ry), coordsA="data", axesA=axes[i],
-            xyB=(s_j.rx, s_j.ry), coordsB="data", axesB=axes[i + 1],
-            patchA=npc_rects[i], patchB=npc_rects[i + 1],
-            arrowstyle="-|>", mutation_scale=11, color="#ef6c00", linewidth=1.3, zorder=10,
-        )
-        fig.add_artist(npc_con)
+            s_i, s_j = snapshots[i], snapshots[i + 1]
+            npc_con = ConnectionPatch(
+                xyA=(s_i.rx, s_i.ry), coordsA="data", axesA=axes[i],
+                xyB=(s_j.rx, s_j.ry), coordsB="data", axesB=axes[i + 1],
+                patchA=npc_rects[i], patchB=npc_rects[i + 1],
+                arrowstyle="-|>", mutation_scale=11, color="#ef6c00", linewidth=1.3, zorder=10,
+            )
+            fig.add_artist(npc_con)
+    else:
+        # "panel"（デフォルト、12.14〜12.22節までと同じ）: パネルとパネルの
+        # 間の空白に、各パネル中央の高さで1本の矢印を描くだけの、
+        # 位置関係とは独立した単純な「次に進む」という記号。実測ログ由来の
+        # スナップショット列（このログ自身が辿った経路そのもの。将来的に
+        # CPDモデルから列挙されうる「シナリオ」をこの上に重ねて示す拡張が
+        # しやすいよう、あえて位置と切り離した表現にしている）向け。
+        #
+        # English: "panel" (default, same as Sections 12.14-12.22) --
+        # just a single arrow drawn in the empty space between panels,
+        # at each panel's mid-height: a simple "advance to the next"
+        # symbol, independent of position. Intended for the snapshot
+        # sequence built from an actual measured log (the path this log
+        # itself followed; deliberately kept independent of position so
+        # that "scenarios" enumerable from the CPD model can later be
+        # overlaid on top of it).
+        for i in range(n - 1):
+            bbox_l = axes[i].get_position()
+            bbox_r = axes[i + 1].get_position()
+            y_mid = (bbox_l.y0 + bbox_l.y1) / 2
+            fig.patches.append(
+                FancyArrowPatch(
+                    (bbox_l.x1, y_mid), (bbox_r.x0, y_mid), transform=fig.transFigure,
+                    arrowstyle="-|>", mutation_scale=12, color="#424242", linewidth=1.2, zorder=10,
+                )
+            )
 
     fig.savefig(output_path, dpi=150)
     plt.close(fig)

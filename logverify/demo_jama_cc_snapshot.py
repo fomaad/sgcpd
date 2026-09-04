@@ -249,6 +249,7 @@ def run(json_path: str) -> None:
         ego_half_length=eh_l, ego_half_width=eh_w, npc_half_length=nh_l, npc_half_width=nh_w,
         title="TD-NI-AR-SD-N04-CI-0067: 対応するgcpd.Model（箱ごとの代表位置、EGO/NPC相対位置版）",
         show_time=False,
+        transition_arrow_style="boxes",
     )
     print(f"CPDモデル位置関係図を書き出しました: {model_pos_path}")
 
