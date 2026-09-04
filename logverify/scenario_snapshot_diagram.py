@@ -70,12 +70,31 @@ from logverify.abstract_cause_diagram import CONTACT_COLORS, DECEL_COLORS, PRED_
 matplotlib.rcParams["font.sans-serif"] = ["Noto Sans CJK JP", "Noto Sans CJK SC", "DejaVu Sans"]
 matplotlib.rcParams["axes.unicode_minus"] = False
 
-# 12.18節のTTCゾーン抽象値の色（信号色）。
-TTC_COLORS = {
-    "safe": "#a5d6a7",
-    "caution": "#ffcc80",
-    "danger": "#ef9a9a",
+# 12.21節: JAMA C&Cモデルの反実仮想と実際のNPC位置とのずれ（縦方向の
+# 「差」＝ rx_cc_ref - rx）を強調表示するための色分け。差が小さいほど
+# 「有能で慎重な人間ドライバなら取ったはずの挙動に近い」ことを意味し、
+# 差が大きいほど、実際の挙動がその基準から乖離している（＝危険側）
+# ことを意味する。
+#
+# English: Section 12.21 — colors for emphasizing the deviation
+# (longitudinal "gap" = rx_cc_ref - rx) between the JAMA C&C model's
+# counterfactual and the actual NPC position. A small gap means the
+# actual behavior is close to what a competent and careful human
+# driver would have produced; a large gap means the actual behavior
+# has diverged from that reference (i.e. toward the dangerous side).
+CC_GAP_COLORS = {
+    "match": "#a5d6a7",
+    "deviate": "#ffcc80",
+    "diverge": "#ef9a9a",
 }
+
+
+def _cc_gap_label(gap: float) -> str:
+    if gap <= 1.0:
+        return "match"
+    if gap <= 5.0:
+        return "deviate"
+    return "diverge"
 
 
 @dataclass
@@ -98,17 +117,22 @@ class ScenarioSnapshot:
     contact_label: Optional[str] = None
     lane_k: Optional[int] = None
     pos_i: Optional[int] = None
-    # 12.18/12.19節: TTCによる抽象値、およびJAMA C&Cモデルの反実仮想
-    # （risk知覚後のカウンターファクチュアルなNPCとの縦方向距離）。
-    # どちらもNoneなら、そのラベル・ゴースト矩形は描かれない
-    # （12.14節までの図との後方互換）。
+    # 12.19節: JAMA C&Cモデルの反実仮想（risk知覚後のカウンターファク
+    # チュアルなNPCとの縦方向距離）。Noneなら、そのゴースト矩形・
+    # C&C差ラベルは描かれない（12.14節までの図との後方互換）。
+    # 12.20節でTTCラベルを併記していたが、12.21節でTTCは抽象化に
+    # 有用でないと判断し、本モジュールからは削除した（TTC自体は
+    # jama_cc_model.find_risk_perceived_frame の内部トリガーとしては
+    # 引き続き使われている）。
     #
-    # English: Section 12.18/12.19's TTC-based abstract label, and the
-    # JAMA C&C model's counterfactual (the NPC's longitudinal distance
-    # under the reference driver, after risk is perceived). Either left
-    # None draws neither the label nor the ghost NPC box (backward
-    # compatible with the diagrams through Section 12.14).
-    ttc_label: Optional[str] = None
+    # English: Section 12.19's JAMA C&C model counterfactual (the NPC's
+    # longitudinal distance under the reference driver, after risk is
+    # perceived). None draws neither the ghost NPC box nor the C&C-gap
+    # label (backward compatible with the diagrams through Section
+    # 12.14). Section 12.20 additionally showed a TTC label here, but
+    # Section 12.21 removed it from this module (TTC itself remains in
+    # use as one of the internal triggers of
+    # jama_cc_model.find_risk_perceived_frame).
     rx_cc_ref: Optional[float] = None
 
 
@@ -164,7 +188,7 @@ def plot_scenario_snapshot_sequence(
     label_h_in = panel_h_in * 0.30
     fig = plt.figure(figsize=(panel_w_in * n, panel_h_in + label_h_in))
     gs = fig.add_gridspec(2, n, height_ratios=[panel_h_in, label_h_in], hspace=0.08, wspace=0.15,
-                           top=0.86, bottom=0.03, left=0.02, right=0.99)
+                           top=0.84, bottom=0.03, left=0.02, right=0.99)
     axes = [fig.add_subplot(gs[0, j]) for j in range(n)]
     label_axes = [fig.add_subplot(gs[1, j]) for j in range(n)]
 
@@ -188,16 +212,40 @@ def plot_scenario_snapshot_sequence(
         ax.add_patch(npc_rect)
         ax.text(s.rx, s.ry, "NPC", ha="center", va="center", fontsize=6.5, color="white", zorder=4)
 
-        # 12.19節: JAMA C&Cモデルの反実仮想における、その箱の代表フレーム
-        # でのNPC縦方向位置を、実際のNPC矩形に重ねて破線の「ゴースト」
+        # 12.19/12.21節: JAMA C&Cモデルの反実仮想における、その箱の代表
+        # フレームでのNPC縦方向位置を、実際のNPC矩形に重ねて「ゴースト」
         # 矩形として描く（risk知覚前、あるいは反実仮想が未定義の箱では
-        # 描かない）。
+        # 描かない）。12.21節でユーザーから「C&C部分を強調してほしい」
+        # との依頼を受け、太線・ハッチング・ラベル・実際位置との差を示す
+        # 矢印を追加して、単なる細い破線枠より強く目立つようにした。
+        #
+        # English: Sections 12.19/12.21 — draw the NPC's longitudinal
+        # position under the JAMA C&C model's counterfactual, at that
+        # box's representative frame, as a "ghost" rectangle overlaid on
+        # the actual NPC rectangle (omitted where risk has not yet been
+        # perceived, or the counterfactual is undefined). Per the user's
+        # Section 12.21 request to "emphasize the C&C part", this was
+        # made more visually prominent than a thin dashed outline: a
+        # thicker hatched rectangle, a text label, and an arrow showing
+        # the deviation from the actual position.
         if s.rx_cc_ref is not None:
+            gap = s.rx_cc_ref - s.rx
             ghost_rect = Rectangle(
                 (s.rx_cc_ref - npc_half_length, s.ry - npc_half_width), 2 * npc_half_length, 2 * npc_half_width,
-                facecolor="none", edgecolor="#1565c0", linewidth=1.1, linestyle="--", zorder=3.5,
+                facecolor="#1565c0", alpha=0.18, edgecolor="#0d47a1", linewidth=2.2, linestyle="--",
+                hatch="////", zorder=3.6,
             )
             ax.add_patch(ghost_rect)
+            ax.text(s.rx_cc_ref, s.ry - npc_half_width - 0.45, "C&C基準",
+                    ha="center", va="top", fontsize=6.3, color="#0d47a1", fontweight="bold", zorder=4.1)
+            if abs(gap) > 0.05:
+                arrow_y = s.ry + npc_half_width + 0.55
+                ax.annotate(
+                    "", xy=(s.rx_cc_ref, arrow_y), xytext=(s.rx, arrow_y),
+                    arrowprops=dict(arrowstyle="-|>", color="#0d47a1", linewidth=1.6), zorder=4.2,
+                )
+                ax.text((s.rx + s.rx_cc_ref) / 2, arrow_y + y_extent * 0.05, f"{gap:+.1f}m",
+                        ha="center", va="bottom", fontsize=6.3, color="#0d47a1", fontweight="bold", zorder=4.2)
 
         # Ve0: Ego's own forward speed
         _draw_velocity_arrow(ax, ego_half_length, ego_half_width * 0.55, s.ego_speed * speed_scale, 0,
@@ -246,21 +294,30 @@ def plot_scenario_snapshot_sequence(
         lax.set_xlim(0, 1)
         lax.set_ylim(0, 1)
         lax.axis("off")
-        has_ttc = s.ttc_label is not None
-        if has_ttc:
-            _abstract_label_row(lax, 0.85, "TTC", s.ttc_label, TTC_COLORS)
-            _abstract_label_row(lax, 0.60, "減速", s.decel_label, DECEL_COLORS)
-            _abstract_label_row(lax, 0.35, "予測", s.pred_label, PRED_COLORS)
-            _abstract_label_row(lax, 0.10, "余裕", s.contact_label, CONTACT_COLORS)
+        has_cc = s.rx_cc_ref is not None
+        if has_cc:
+            gap = s.rx_cc_ref - s.rx
+            gap_label = _cc_gap_label(gap)
+            color = CC_GAP_COLORS.get(gap_label, "#dddddd")
+            lax.text(
+                0.5, 0.87, f"C&C差: {gap:+.1f}m", transform=lax.transAxes, ha="center", va="center",
+                fontsize=8.5, fontweight="bold",
+                bbox=dict(boxstyle="round,pad=0.35", facecolor=color, edgecolor="#0d47a1", linewidth=1.8),
+            )
+            _abstract_label_row(lax, 0.58, "減速", s.decel_label, DECEL_COLORS)
+            _abstract_label_row(lax, 0.33, "予測", s.pred_label, PRED_COLORS)
+            _abstract_label_row(lax, 0.08, "余裕", s.contact_label, CONTACT_COLORS)
         else:
             _abstract_label_row(lax, 0.80, "減速", s.decel_label, DECEL_COLORS)
             _abstract_label_row(lax, 0.47, "予測", s.pred_label, PRED_COLORS)
             _abstract_label_row(lax, 0.14, "余裕", s.contact_label, CONTACT_COLORS)
 
-    fig.suptitle(title or "Scenario snapshot sequence (= CPD box sequence)", fontsize=12)
+    fig.suptitle(title or "Scenario snapshot sequence (= CPD box sequence)", fontsize=12, y=0.995)
     if any(s.rx_cc_ref is not None for s in snapshots):
-        fig.text(0.5, 0.965, "青破線＝JAMA C&Cモデルの反実仮想NPC位置（12.19節）",
-                  ha="center", va="top", fontsize=8.5, color="#1565c0")
+        fig.text(0.5, 0.955,
+                  "ハッチング矩形＝JAMA C&Cモデルの反実仮想NPC位置（12.19節）／ "
+                  "「C&C差」＝有能で慎重な人間ドライバとの縦方向乖離量",
+                  ha="center", va="top", fontsize=8.5, color="#0d47a1", fontweight="bold")
 
     # Draw a connecting arrow between adjacent panels (CPD transition), in figure coordinates.
     fig.canvas.draw()

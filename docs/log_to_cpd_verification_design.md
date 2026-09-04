@@ -876,3 +876,30 @@ a_IDM = a_max・(1 - (v/v0)^δ - (s*/s)^2)
 **副次的な発見。** TTCラベルは、危険な接近中(box#7〜#13)は一貫して"danger"を示すが、衝突が実際に起きた箱#15以降では"safe"に戻ってしまう。これはTTCの定義（縦方向の残り距離÷接近速度）が「まだ接触していない、かつ接近中」の場合にしか意味を持たず、接触・すれ違い後は「もう近づいていない」ため機械的に安全側に分類されてしまうという、12.18節でも触れた性質である。CPD箱列という形式で可視化したことで、この「TTCは事後には無力である」という限界が、時系列グラフで見るよりもさらに直接的に（衝突箱のすぐ隣で"safe"ラベルが表示されるという形で）確認できた。
 
 実装は`logverify/scenario_snapshot_diagram.py`（`ScenarioSnapshot.ttc_label`, `ScenarioSnapshot.rx_cc_ref`フィールドの追加、ゴースト矩形描画）と`logverify/demo_jama_cc_snapshot.py`（`python3 -m logverify.demo_jama_cc_snapshot`）。図は`out_gif/jama_cc_scenario_snapshots.png`。
+
+### 12.21 TTCラベルの削除、C&C部分の強調、および「対応するCPDモデル」の出力（v0.21）
+
+12.20節末の副次的発見（TTCは接触後に機械的に"safe"へ戻ってしまう）を受けてユーザーに「TTCは抽象化には役にたっていなくて，JAMAのC&Cドライバモデルだけ使った方が良いですかね？」と問われ、TTCの図上での単独の抽象値としての価値は薄い一方、JAMA C&Cモデル自身の内部トリガー（リスク知覚境界の一つ）としては引き続き使われている、という分析を回答した。これに対しユーザーから「TTCを消してください．C&C部分を強調してください．また，対応するCPDモデルも出力できるようにしてください．」との3点の明示的な指示があり、本節はそれに応える。
+
+**(a) TTCラベルの削除。** `scenario_snapshot_diagram.py`から`TTC_COLORS`、および`ScenarioSnapshot.ttc_label`フィールドとそれを表示する分岐（`has_ttc`）を削除した。TTC自体（`compute_ttc`）は`jama_cc_model.find_risk_perceived_frame`の内部で縦方向境界(TTC=2.0秒)の判定に引き続き使われており、削除したのは「図上に独立した抽象値として表示すること」のみである。
+
+**(b) C&C部分の強調。** 12.20節までのゴースト矩形は、細い青破線の輪郭線のみで描かれており、目立ちにくかった。本節では次の変更を加えた。
+
+- ゴースト矩形を太線(linewidth 2.2)・ハッチング(`////`)・半透明の塗りつぶし付きで描画し、「C&C基準」というラベルを矩形の下に添えた。
+- 実際のNPC位置とC&C反実仮想位置の間に、両者のずれ(縦方向の差、m)を示す矢印とテキストを追加した。
+- ラベル欄に、TTCラベルの代わりに**「C&C差」ラベル**（`rx_cc_ref - rx`、すなわち反実仮想が実際の挙動よりどれだけ手前/先にいたか）を、色分け（差が1m以下＝緑「match」、1〜5m＝橙「deviate」、5m超＝赤「diverge」）付きの太字ボックスとして最上段に配置した。
+- 図全体の注記テキストも「ハッチング矩形＝JAMA C&Cモデルの反実仮想NPC位置／『C&C差』＝有能で慎重な人間ドライバとの縦方向乖離量」に更新した。
+
+ログ0067に適用した結果（`out_gif/jama_cc_scenario_snapshots.png`）、risk知覚直後の箱#3ではC&C差はほぼ0m（両者はまだ同一の反応前の軌道）だが、時間が進むにつれてC&C差は急速に拡大し、衝突箱#15の時点では+49.4m、表示範囲の最後の箱#18では+56.3mに達している。これは「実際のEgoは、有能で慎重な人間ドライバが取ったはずの制動から、時間とともにどんどん乖離していった」ことを、色分けされた1つの数値として箱ごとに直接読み取れるようにしたものである。
+
+**(c) 「対応するCPDモデル」の出力。** ここまでの12.14/12.18〜12.21節の図は、いずれも`scenario_snapshot_diagram.py`独自の模式図描画ロジック（matplotlibで箱・矢印・ラベルを手で並べる）であり、12.9節で導入した「実際に`gcpd.Model`（Z3のBox/Pos/Lane関数とSAT遷移制約）として構築された正式なCPD」そのものではなかった。ユーザーの「対応するCPDモデルも出力できるようにしてください」との依頼に応え、`demo_jama_cc_snapshot.py`に以下を追加した。
+
+- `multi_log_model.build_single_log_model_hysteresis`を使い、スナップショット列と**全く同じ格子・同じヒステリシス処理**（`auto_grid_params_from_ajisai`で自動導出した`rx_near_cell`/`rx_far_cell`/`rx_near_range`/`gy`、`margin_ratio=0.3`）で箱列を作り、それを実際の`gcpd.Model`として構築する。この関数は12.9節で導入された、1本のログをMethod Cの機械（格子ベースのモデル構築）に限定して適用する`build_single_log_model_hysteresis`であり、同じ箱列を使うため、スナップショット列側の`box_index`・`(lane_k, pos_i)`と、CPDモデル図側の箱番号が1対1に対応する（節タイトルの「対応する」はこの意味）。
+- `multi_log_model.verify_logs_included`でmembership check（このログ自身の箱列がモデルに含まれる=SATであること）を確認する。
+- `model_diagram.plot_model_with_ego_paper_style`で、12.7/12.8/12.9/12.14節と同じ箱矢印図として可視化する（`out_gif/jama_cc_cpd_model.png`）。
+
+ログ0067に適用したところ、ダミー開始箱を含めて40箱・max_step=45のモデルが構築され、membership check はSAT（元ログ自身がモデルに含まれることを確認）だった。生成された図は、NPCの箱列がlane=-8からlane+2まで遷移する様子を、Egoの箱列（緑のスイムレーン）と並べて示しており、スナップショット列の各パネルの箱番号・(k,i)と対応付けて読むことができる。
+
+**限界。** (1) TTCの削除は「図に表示しない」ことであり、JAMA C&Cモデル自身の判定ロジックからTTCを除去したわけではない——TTCが判定に使われている以上、TTC自体の妥当性（例えば2.0秒という閾値の根拠）についての疑問は引き続き残る。(2) 「対応するCPDモデル」は今回1本のログのみから構築しており、12.16/12.17節のような複数ログを統合した`gcpd.Model`（`build_union_model_near_far_grid`）とは異なるモデルである——後者と対応させたい場合は、スナップショット列側の格子と`build_union_model_near_far_grid`側の格子（近傍/遠方セルサイズ）を合わせる追加の設計が必要になる。
+
+実装は`logverify/scenario_snapshot_diagram.py`（`TTC_COLORS`・`ttc_label`の削除、`CC_GAP_COLORS`・ゴースト矩形の強調描画の追加）と`logverify/demo_jama_cc_snapshot.py`（`build_single_log_model_hysteresis` + `verify_logs_included` + `plot_model_with_ego_paper_style`による「対応するCPDモデル」の構築・出力、`python3 -m logverify.demo_jama_cc_snapshot`）。図は`out_gif/jama_cc_scenario_snapshots.png`（改訂版）と`out_gif/jama_cc_cpd_model.png`（新規）。
