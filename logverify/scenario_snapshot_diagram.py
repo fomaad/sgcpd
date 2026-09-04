@@ -63,7 +63,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.patches import FancyArrowPatch, Rectangle
+from matplotlib.patches import ConnectionPatch, FancyArrowPatch, Rectangle
 
 from logverify.abstract_cause_diagram import CONTACT_COLORS, DECEL_COLORS, PRED_COLORS
 
@@ -193,6 +193,8 @@ def plot_scenario_snapshot_sequence(
     axes = [fig.add_subplot(gs[0, j]) for j in range(n)]
     label_axes = [fig.add_subplot(gs[1, j]) for j in range(n)]
 
+    ego_rects: List[Rectangle] = []
+    npc_rects: List[Rectangle] = []
     for ax, s in zip(axes, snapshots):
         ax.axhspan(-ego_half_width, ego_half_width, color="#c8e6c9", alpha=0.55, zorder=0)
         ax.axhline(0, color="#9e9e9e", lw=0.5, ls=":", zorder=1)
@@ -203,6 +205,7 @@ def plot_scenario_snapshot_sequence(
         )
         ax.add_patch(ego_rect)
         ax.text(0, 0, "Ego", ha="center", va="center", fontsize=6.5, color="white", zorder=4)
+        ego_rects.append(ego_rect)
 
         is_colliding = s.contact_label == "接触"
         npc_color = "#e53935" if is_colliding else "#ffa726"
@@ -212,6 +215,7 @@ def plot_scenario_snapshot_sequence(
         )
         ax.add_patch(npc_rect)
         ax.text(s.rx, s.ry, "NPC", ha="center", va="center", fontsize=6.5, color="white", zorder=4)
+        npc_rects.append(npc_rect)
 
         # 12.19/12.21節: JAMA C&Cモデルの反実仮想における、その箱の代表
         # フレームでのNPC縦方向位置を、実際のNPC矩形に重ねて「ゴースト」
@@ -323,18 +327,44 @@ def plot_scenario_snapshot_sequence(
                   "「C&C差」＝有能で慎重な人間ドライバとの縦方向乖離量",
                   ha="center", va="top", fontsize=8.5, color="#0d47a1", fontweight="bold")
 
-    # Draw a connecting arrow between adjacent panels (CPD transition), in figure coordinates.
+    # 箱遷移(CPDのntrans)を表す矢印を、パネルとパネルの間の宙に引くのでは
+    # なく、EGOを表す矩形どうし・NPCを表す矩形どうしを直接結ぶ形で描く
+    # （ユーザーからの依頼: 「BOX遷移は，スナップショットではなくて，
+    # EGOを表現するボックスの間にひいてもらえますか．NPCに関しても同様
+    # です」）。ConnectionPatchはpatchA/patchBを指定すると、指定した
+    # パッチの境界で矢印を切り詰めてくれるため、パネル(axes)をまたいでも
+    # 矩形の縁から縁への矢印になる。EGO用とNPC用で色を変え、どちらの
+    # 遷移かが一目で分かるようにした。
+    #
+    # English: Draw the arrows representing box transitions (CPD's
+    # ntrans) not as a generic line floating between panels, but
+    # directly connecting the rectangles that represent EGO to each
+    # other, and separately the rectangles that represent NPC to each
+    # other (per the user's request: "rather than between the
+    # snapshots, could you draw the box transition between the boxes
+    # representing EGO, and likewise for NPC"). ConnectionPatch, given
+    # patchA/patchB, clips the arrow at the given patch's boundary, so
+    # even across different panels (axes) the arrow runs edge-to-edge
+    # between the rectangles. EGO and NPC arrows use different colors
+    # so which transition is which is clear at a glance.
     fig.canvas.draw()
     for i in range(n - 1):
-        bbox_l = axes[i].get_position()
-        bbox_r = axes[i + 1].get_position()
-        y_mid = (bbox_l.y0 + bbox_l.y1) / 2
-        fig.patches.append(
-            FancyArrowPatch(
-                (bbox_l.x1, y_mid), (bbox_r.x0, y_mid), transform=fig.transFigure,
-                arrowstyle="-|>", mutation_scale=12, color="#424242", linewidth=1.2, zorder=10,
-            )
+        ego_con = ConnectionPatch(
+            xyA=(0, 0), coordsA="data", axesA=axes[i],
+            xyB=(0, 0), coordsB="data", axesB=axes[i + 1],
+            patchA=ego_rects[i], patchB=ego_rects[i + 1],
+            arrowstyle="-|>", mutation_scale=11, color="#1565c0", linewidth=1.3, zorder=10,
         )
+        fig.add_artist(ego_con)
+
+        s_i, s_j = snapshots[i], snapshots[i + 1]
+        npc_con = ConnectionPatch(
+            xyA=(s_i.rx, s_i.ry), coordsA="data", axesA=axes[i],
+            xyB=(s_j.rx, s_j.ry), coordsB="data", axesB=axes[i + 1],
+            patchA=npc_rects[i], patchB=npc_rects[i + 1],
+            arrowstyle="-|>", mutation_scale=11, color="#ef6c00", linewidth=1.3, zorder=10,
+        )
+        fig.add_artist(npc_con)
 
     fig.savefig(output_path, dpi=150)
     plt.close(fig)
